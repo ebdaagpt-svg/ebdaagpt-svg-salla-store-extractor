@@ -1,3 +1,3 @@
 FROM pyd4vinci/scrapling:latest
 ENV PYTHONUNBUFFERED=1
-CMD ["mcp", "--http", "--host", "0.0.0.0", "--port", "8000", "--allowed-host", "sweet-manifestation-production-9340.up.railway.app"]
+CMD ["mcp", "--http", "--host", "0.0.0.0", "--port", "8080", "--allowed-host", "sweet-manifestation-production-9340.up.railway.app"]
