@@ -1,0 +1,5 @@
+FROM pyd4vinci/scrapling:latest
+
+ENV PYTHONUNBUFFERED=1
+
+CMD ["sh", "-c", "scrapling-mcp --http --host 0.0.0.0 --port ${PORT:-8000} --allowed-host ${RAILWAY_PUBLIC_DOMAIN}"]
