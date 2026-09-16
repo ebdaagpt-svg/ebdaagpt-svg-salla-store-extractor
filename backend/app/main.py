@@ -20,18 +20,30 @@ sessions:dict[str,Session]={}
 
 def finalize(s,tables,raw,mode,start):
     for key in TABLES: tables.setdefault(key,[])
-    issues=validate_catalog(tables); tables["validation_issues"]=[x.model_dump() for x in issues]
+    issues=validate_catalog(tables)
+    for failure in raw.get("extraction_failures",[]):
+        from backend.app.models import Issue
+        issues.append(Issue(Severity="ERROR",Entity_Type="PRODUCT",Entity_ID=None,Field="Source",Issue=failure.get("message","Product extraction failed"),Original_Value=failure.get("url")))
+    if raw.get("safety_truncated"):
+        from backend.app.models import Issue
+        issues.append(Issue(Severity="WARNING",Entity_Type="CATALOG",Entity_ID=None,Field="Pagination",Issue="Product safety limit reached; increase MAX_PRODUCTS to continue",Original_Value=settings.max_products))
+    tables["validation_issues"]=[x.model_dump() for x in issues]
     s.tables=tables;s.raw_data=raw;s.issues=issues;s.mode=mode
     errors=sum(x.Severity=="ERROR" for x in issues); warnings=sum(x.Severity=="WARNING" for x in issues)
     s.stats={"categories":len(tables["categories"]),"products":len(tables["products"]),"variants":len(tables["variants"]),"images":len(tables["images"]),"valid_records":sum(len(v) for k,v in tables.items() if k!="validation_issues")-errors,"warnings":warnings,"errors":errors,"pages_fetched":raw.get("pages_fetched",1),"duration_seconds":round(time.monotonic()-start,3),"timestamp":datetime.now(timezone.utc).isoformat(),"extractor_version":"1.0.0"}
     s.progress_current=len(tables["products"]);s.progress_total=len(tables["products"])
     if mode=="MOCK":s.stage="DEMO_MODE";s.message="External store access is unavailable in this Preview environment. These records are MOCK DATA and were not extracted from the submitted store."
-    elif errors:s.stage="PARTIAL_SUCCESS";s.message="Extraction completed with validation errors. Review Validation Issues before export."
+    elif errors or raw.get("extraction_failures"):s.stage="PARTIAL_SUCCESS";s.message="Extraction completed with validation errors. Review Validation Issues before export."
     else:s.stage="READY";s.message="Live extraction and validation completed."
 
 @app.get("/api/health")
 async def health():
-    return {"backend_status":"ok","extractor_version":"1.0.0","external_network_available":"unknown_until_extraction","browser_available":False}
+    try:
+        import scrapling  # noqa: F401
+        scrapling_available=True
+    except ImportError:
+        scrapling_available=False
+    return {"backend_status":"ok","extractor_version":"1.0.0","external_network_available":"unknown_until_extraction","browser_available":settings.enable_browser_fallback,"scrapling_available":scrapling_available}
 
 @app.post("/api/extract")
 async def extract(req:ExtractRequest):
