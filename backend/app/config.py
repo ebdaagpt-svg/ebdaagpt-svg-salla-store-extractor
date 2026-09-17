@@ -13,6 +13,9 @@ class Settings(BaseSettings):
     full_extraction_timeout_seconds: float = 1800
     extraction_batch_size: int = 40
     sitemap_timeout_seconds: float = 15
+    category_discovery_timeout_seconds: float = 3
+    max_categories: int = 50
+    max_category_depth: int = 2
     request_pacing_min_seconds: float = 0.3
     request_pacing_max_seconds: float = 0.8
     rate_limit_backoff_min_seconds: float = 3

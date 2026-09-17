@@ -17,13 +17,13 @@ def mock_catalog():
             for j,color in enumerate(["أسود","أبيض"],1):
                 vid=f"VAL{i:03}-{j}"; varid=f"VAR{i:03}-{j}"; values.append({"Option_Value_ID":vid,"Option_ID":oid,"Value":color,"Display_Order":j}); variants.append({"Variant_ID":varid,"Product_ID":pid,"SKU":f"SKU-{1000+i}-{j}","Barcode":None,"Price":round(120+i*13.5,2),"Sale_Price":sale,"Quantity":j*3,"Is_Available":True,"Weight":0.5,"Weight_Unit":"kg"}); variant_values.append({"Variant_ID":varid,"Option_ID":oid,"Option_Value_ID":vid})
         product_tags.append({"Product_ID":pid,"Tag_ID":"featured" if i%2 else "new"}); seo.append({"Entity_Type":"PRODUCT","Entity_ID":pid,"Meta_Title":f"منتج تجريبي {i}","Meta_Description":f"بيانات تجريبية للمنتج {i}","Canonical_URL":f"https://demo.invalid/p/{i}"})
-    store=[{"Store_ID":"mock-store","Store_Name":"متجر سلة التجريبي","Store_URL":"https://demo.invalid/","Currency":"SAR","Language":"ar","Extraction_Date":datetime.now(timezone.utc).isoformat(),"Data_Mode":"MOCK","Extractor_Version":"1.9.0"}]
+    store=[{"Store_ID":"mock-store","Store_Name":"متجر سلة التجريبي","Store_URL":"https://demo.invalid/","Currency":"SAR","Language":"ar","Extraction_Date":datetime.now(timezone.utc).isoformat(),"Data_Mode":"MOCK","Extractor_Version":"2.0.0"}]
     return {"store":store,"website_data":[],"categories":categories,"products":products,"product_categories":pc,"images":images,"product_options":options,"option_values":values,"variants":variants,"variant_option_values":variant_values,"tags":tags,"product_tags":product_tags,"seo":seo}
 
 
 def mock_website_data():
     extracted_at = datetime.now(timezone.utc).isoformat()
-    store = [{"Store_ID":"mock-website","Store_Name":"متجر سلة التجريبي","Store_URL":"https://demo.invalid/","Currency":"SAR","Language":"ar","Extraction_Date":extracted_at,"Data_Mode":"MOCK","Extractor_Version":"1.9.0"}]
+    store = [{"Store_ID":"mock-website","Store_Name":"متجر سلة التجريبي","Store_URL":"https://demo.invalid/","Currency":"SAR","Language":"ar","Extraction_Date":extracted_at,"Data_Mode":"MOCK","Extractor_Version":"2.0.0"}]
     values = {
         "Store_Name":"متجر سلة التجريبي",
         "Description":"بيانات موقع تجريبية لاختبار المعاينة فقط",
@@ -39,3 +39,8 @@ def mock_website_data():
     }
     rows = [{"Field":field,"Value":value,"Source_URL":"https://demo.invalid/","Source_Strategy":"MOCK"} for field,value in values.items()]
     return {"store":store,"website_data":rows}
+
+
+def mock_categories():
+    catalog = mock_catalog()
+    return {"store": catalog["store"], "categories": catalog["categories"]}

@@ -20,6 +20,8 @@ def validate_catalog(t):
             if count>1:add("WARNING","PRODUCT",None,field,f"Duplicate {field} across {count} products",val)
     for row in t["product_categories"]:
         if row["Product_ID"] not in pids or row["Category_ID"] not in cids:add("ERROR","PRODUCT_CATEGORY",row.get("Product_ID"),None,"Broken product-category relationship",row)
+    for row in t["categories"]:
+        if row.get("Parent_Category_ID") and row["Parent_Category_ID"] not in cids:add("ERROR","CATEGORY",row.get("Category_ID"),"Parent_Category_ID","Category parent does not exist",row["Parent_Category_ID"])
     for row in t["images"]:
         if row["Product_ID"] not in pids:add("ERROR","IMAGE",row.get("Image_ID"),"Product_ID","Image parent product does not exist",row["Product_ID"])
     for row in t["variants"]:

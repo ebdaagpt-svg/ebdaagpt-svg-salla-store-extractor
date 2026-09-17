@@ -321,7 +321,7 @@ def website_data_from_page(raw: list[dict], soup: BeautifulSoup, url: str, strat
         add("Mobile_App_Apple", salla_store["apps"].get("appstore"), "SALLA_PUBLIC_STATE")
         add("Mobile_App_Android", salla_store["apps"].get("googleplay"), "SALLA_PUBLIC_STATE")
 
-    store = [{"Store_ID": str(salla_store.get("id") or stable_id("store", canonical)), "Store_Name": name or "Salla Store", "Store_URL": canonical, "Currency": currency, "Language": soup.html.get("lang") if soup.html else None, "Extraction_Date": datetime.now(timezone.utc).isoformat(), "Data_Mode": "LIVE", "Extractor_Version": "1.9.0"}]
+    store = [{"Store_ID": str(salla_store.get("id") or stable_id("store", canonical)), "Store_Name": name or "Salla Store", "Store_URL": canonical, "Currency": currency, "Language": soup.html.get("lang") if soup.html else None, "Extraction_Date": datetime.now(timezone.utc).isoformat(), "Data_Mode": "LIVE", "Extractor_Version": "2.0.0"}]
     return store, rows
 
 
@@ -589,6 +589,73 @@ async def discover_sitemaps(client, base_url: str, max_pages: int, max_depth: in
     return list({x["url"]: x for x in entries}.values()), len(seen), sorted(strategies)
 
 
+def categories_from_dom(soup: BeautifulSoup, page_url: str, max_categories: int = 50, max_depth: int = 2) -> list[dict]:
+    """Read only menu categories and their direct children; never open category pages."""
+    selectors = 'header nav a[href], salla-menu a[href], .main-menu a[href], .store-menu a[href], nav[class*="menu" i] a[href]'
+    rows = {}
+    for anchor in soup.select(selectors):
+        category_url = urljoin(page_url, anchor.get("href", ""))
+        cid = source_id_from_url(category_url, CATEGORY_PATH)
+        if not cid or cid in rows:
+            continue
+        ancestor_ids = []
+        item = anchor.find_parent("li")
+        ancestor = item.find_parent("li") if item else None
+        while ancestor:
+            parent_anchor = ancestor.find("a", href=True)
+            parent_url = urljoin(page_url, parent_anchor.get("href", "")) if parent_anchor else ""
+            parent_id = source_id_from_url(parent_url, CATEGORY_PATH)
+            if parent_id and parent_id != cid and parent_id not in ancestor_ids:
+                ancestor_ids.append(parent_id)
+            ancestor = ancestor.find_parent("li")
+        depth = 1 + len(ancestor_ids)
+        if depth > max_depth:
+            continue
+        slug, fallback_name = slug_name(category_url)
+        rows[cid] = {"Category_ID": cid, "Parent_Category_ID": ancestor_ids[0] if ancestor_ids else None, "Name": text_or_none(anchor.get_text(" ")) or fallback_name or cid, "Slug": slug, "URL": category_url, "Description": None, "Display_Order": len(rows) + 1, "Is_Active": True}
+        if len(rows) >= max_categories:
+            break
+    return list(rows.values())
+
+
+async def extract_categories_only(url: str):
+    headers = request_headers()
+    async with httpx.AsyncClient(timeout=httpx.Timeout(settings.request_timeout), headers=headers) as client:
+        client._salla_request_pacer = RequestPacer()
+        home = await fetch(client, url)
+        marker = (home.text + " " + str(home.headers)).lower()
+        if not any(value in marker for value in ["salla", "cdn.salla", "salla.sa", "salla-theme"]):
+            raise ExtractionFailure("NOT_SALLA_STORE", "The target does not appear to be a public Salla storefront")
+        soup = BeautifulSoup(home.text, "lxml")
+        categories = categories_from_dom(soup, home.url, settings.max_categories, settings.max_category_depth)
+        pages_fetched, strategies, timed_out = 1, {home.strategy}, False
+        if not categories:
+            try:
+                sitemap_entries, sitemap_pages, sitemap_strategies = await asyncio.wait_for(
+                    discover_sitemaps(client, url, min(settings.quick_max_pages, 8), 1),
+                    timeout=settings.category_discovery_timeout_seconds,
+                )
+                pages_fetched += sitemap_pages
+                strategies.update(sitemap_strategies)
+                for entry in sitemap_entries:
+                    cid = source_id_from_url(entry["url"], CATEGORY_PATH)
+                    if not cid or any(row["Category_ID"] == cid for row in categories):
+                        continue
+                    slug, name = slug_name(entry["url"])
+                    categories.append({"Category_ID": cid, "Parent_Category_ID": None, "Name": name or cid, "Slug": slug, "URL": entry["url"], "Description": None, "Display_Order": len(categories) + 1, "Is_Active": True})
+                    if len(categories) >= settings.max_categories:
+                        break
+            except asyncio.TimeoutError:
+                timed_out = True
+        if not categories and not timed_out:
+            raise ExtractionFailure("UNSUPPORTED_STRUCTURE", "No public category menu or category sitemap entries were found")
+        name = text_or_none(soup.title.string if soup.title else None) or "Salla Store"
+        store = [{"Store_ID": stable_id("store", url), "Store_Name": name, "Store_URL": url, "Currency": None, "Language": soup.html.get("lang") if soup.html else None, "Extraction_Date": datetime.now(timezone.utc).isoformat(), "Data_Mode": "LIVE", "Extractor_Version": "2.0.0"}]
+        tables = {"store": store, "categories": categories}
+        raw = {"source_url": url, "requested_url": url, "target_scope": "CATEGORIES", "data_type": "CATEGORIES", "exact_url_preserved": True, "session_cache_reset": True, "products_discovered": 0, "products_selected": 0, "products_extracted": 0, "categories_extracted": len(categories), "max_categories": settings.max_categories, "max_category_depth": settings.max_category_depth, "category_discovery_timeout_seconds": settings.category_discovery_timeout_seconds, "pages_fetched": pages_fetched, "strategies": sorted(strategies), "timed_out": timed_out, "timeout_seconds": settings.category_discovery_timeout_seconds}
+        return tables, raw
+
+
 async def extract_live(url: str, extraction_mode: str = "QUICK", progress_callback=None, checkpoint_callback=None, checkpoint_loader=None, max_products_override: int | None = None):
     max_products = max_products_override if max_products_override is not None else (None if extraction_mode == "FULL" else settings.quick_products)
     is_full = max_products is None or max_products > settings.quick_products
@@ -612,7 +679,8 @@ async def extract_live(url: str, extraction_mode: str = "QUICK", progress_callba
             except asyncio.TimeoutError:
                 sitemap_entries, sitemap_pages, sitemap_strategies, timed_out = [], 0, [], True
             product_entries = [x for x in sitemap_entries if source_id_from_url(x["url"])]
-            category_entries = [x for x in sitemap_entries if source_id_from_url(x["url"], CATEGORY_PATH)]
+            # Products-only never builds or opens the store category tree.
+            category_entries = []
         elif scope == "PRODUCT":
             sitemap_entries, sitemap_pages, sitemap_strategies = [], 0, [home.strategy]
             product_entries = [{"url": url, "lastmod": None, "images": []}]
@@ -696,6 +764,8 @@ async def extract_live(url: str, extraction_mode: str = "QUICK", progress_callba
                 key = category_url.rstrip("/") or f"name:{name.casefold()}"
                 category = category_by_url.get(key)
                 if not category:
+                    if len(categories) >= settings.max_categories:
+                        continue
                     cid = source_id_from_url(category_url, CATEGORY_PATH) or stable_id("cat", category_url or name)
                     slug, _ = slug_name(category_url)
                     category = {"Category_ID": cid, "Parent_Category_ID": None, "Name": name, "Slug": slug, "URL": category_url, "Description": None, "Display_Order": len(categories) + 1, "Is_Active": True}
@@ -708,7 +778,7 @@ async def extract_live(url: str, extraction_mode: str = "QUICK", progress_callba
         if not products:
             raise ExtractionFailure("UNSUPPORTED_STRUCTURE", "Salla storefront detected, but no public product records could be structured")
         name = text_or_none(home_soup.title.string if home_soup.title else None) or "Salla Store"
-        store = [{"Store_ID": stable_id("store", url), "Store_Name": name, "Store_URL": url, "Currency": next((p["Currency"] for p in products if p["Currency"]), None), "Language": home_soup.html.get("lang") if home_soup.html else None, "Extraction_Date": datetime.now(timezone.utc).isoformat(), "Data_Mode": "LIVE", "Extractor_Version": "1.9.0"}]
+        store = [{"Store_ID": stable_id("store", url), "Store_Name": name, "Store_URL": url, "Currency": next((p["Currency"] for p in products if p["Currency"]), None), "Language": home_soup.html.get("lang") if home_soup.html else None, "Extraction_Date": datetime.now(timezone.utc).isoformat(), "Data_Mode": "LIVE", "Extractor_Version": "2.0.0"}]
         tables = {"store": store, "categories": categories, "products": products, "product_categories": product_categories, "images": images, "product_options": [], "option_values": [], "variants": variants, "variant_option_values": [], "tags": [], "product_tags": [], "seo": seo}
         raw = {"source_url": url, "requested_url": url, "target_scope": scope, "exact_url_preserved": True, "session_cache_reset": True, "category_isolation": scope == "CATEGORY", "store_sitemap_fallback_used": scope == "STORE", "extraction_mode": extraction_mode, "max_products": max_products, "strategies": sorted(strategies), "pages_fetched": 1 + sitemap_pages + len(results) + len(failures), "sitemap_pages": sitemap_pages, "sitemap_entries": len(sitemap_entries), "products_discovered": len(product_entries), "products_selected": len(selected_entries), "products_extracted": len(products), "extraction_failures": list(failures.values()), "safety_truncated": max_products is not None and len(product_entries) > max_products, "timed_out": timed_out, "timeout_seconds": timeout_seconds}
         return tables, raw

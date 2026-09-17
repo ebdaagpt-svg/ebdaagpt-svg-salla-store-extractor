@@ -136,7 +136,9 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [stage, setStage] = useState("IDLE");
   const [error, setError] = useState("");
-  const [dataType, setDataType] = useState<"PRODUCTS" | "WEBSITE">("PRODUCTS");
+  const [dataType, setDataType] = useState<
+    "PRODUCTS" | "CATEGORIES" | "WEBSITE"
+  >("PRODUCTS");
   const [productLimit, setProductLimit] = useState("30");
   async function run() {
     setBusy(true);
@@ -153,7 +155,7 @@ function App() {
           data_type: dataType,
           extraction_mode: productLimit === "ALL" ? "FULL" : "QUICK",
           max_products:
-            dataType === "WEBSITE" || productLimit === "ALL"
+            dataType !== "PRODUCTS" || productLimit === "ALL"
               ? null
               : Number(productLimit),
         }),
@@ -217,7 +219,7 @@ function App() {
           <Database size={22} />
           <div>
             <strong>Salla Data Extractor</strong>
-            <small>Migration preparation · v1.9.0</small>
+            <small>Migration preparation · v2.0.0</small>
           </div>
         </div>
         <div className="health">
@@ -247,11 +249,14 @@ function App() {
             <select
               value={dataType}
               onChange={(e) =>
-                setDataType(e.target.value as "PRODUCTS" | "WEBSITE")
+                setDataType(
+                  e.target.value as "PRODUCTS" | "CATEGORIES" | "WEBSITE",
+                )
               }
               disabled={busy}
             >
               <option value="PRODUCTS">Products only</option>
+              <option value="CATEGORIES">Categories only · max 50</option>
               <option value="WEBSITE">
                 Website data · name, location, social media
               </option>
@@ -262,7 +267,7 @@ function App() {
             <select
               value={productLimit}
               onChange={(e) => setProductLimit(e.target.value)}
-              disabled={busy || dataType === "WEBSITE"}
+              disabled={busy || dataType !== "PRODUCTS"}
             >
               <option value="30">30 products</option>
               <option value="50">50 products</option>

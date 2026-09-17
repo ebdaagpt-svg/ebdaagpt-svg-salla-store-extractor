@@ -8,15 +8,15 @@ from pathlib import Path
 from backend.app.config import settings
 from backend.app.models import ExtractRequest, Session, TABLES
 from backend.app.utils import normalize_url, validate_public_host, URLSafetyError
-from backend.app.extractors.salla import extract_live, extract_website_data, ExtractionFailure
-from backend.app.mock.data import mock_catalog, mock_website_data
+from backend.app.extractors.salla import extract_categories_only, extract_live, extract_website_data, ExtractionFailure
+from backend.app.mock.data import mock_catalog, mock_categories, mock_website_data
 from backend.app.validators.catalog import validate_catalog
 from backend.app.exporters.files import xlsx_bytes, zip_bytes
 from backend.app.services.session_store import SessionStore
 from backend.app.transformers.products_flat import build_products_flat
 
 logging.basicConfig(level=logging.INFO,format="%(asctime)s %(levelname)s %(name)s %(message)s")
-app=FastAPI(title="Salla Store Extractor",version="1.9.0")
+app=FastAPI(title="Salla Store Extractor",version="2.0.0")
 app.add_middleware(CORSMiddleware,allow_origins=["http://localhost:5173","http://127.0.0.1:5173"],allow_methods=["*"],allow_headers=["*"])
 session_store=SessionStore(settings.session_db_path)
 recovered_sessions=session_store.recover_interrupted()
@@ -58,10 +58,10 @@ def finalize(s,tables,raw,mode,start):
     tables["validation_issues"]=[x.model_dump() for x in issues]
     s.tables=tables;s.raw_data=raw;s.issues=issues;s.mode=mode
     errors=sum(x.Severity=="ERROR" for x in issues); warnings=sum(x.Severity=="WARNING" for x in issues)
-    s.stats={"categories":len(tables["categories"]),"products":len(tables["products"]),"variants":len(tables["variants"]),"images":len(tables["images"]),"website_fields":len(tables["website_data"]),"valid_records":max(0,sum(len(v) for k,v in tables.items() if k!="validation_issues")-errors),"warnings":warnings,"errors":errors,"pages_fetched":raw.get("pages_fetched",1),"duration_seconds":round(time.monotonic()-start,3),"timestamp":datetime.now(timezone.utc).isoformat(),"extractor_version":"1.9.0","data_type":s.data_type,"product_limit":"N/A" if s.data_type=="WEBSITE" else (s.max_products or "ALL"),"extraction_mode":s.extraction_mode,"target_scope":raw.get("target_scope","STORE")}
-    completed=1 if s.data_type=="WEBSITE" else raw.get("products_selected",len(tables["products"]));s.progress_current=completed;s.progress_total=completed;s.progress_percentage=100
+    s.stats={"categories":len(tables["categories"]),"products":len(tables["products"]),"variants":len(tables["variants"]),"images":len(tables["images"]),"website_fields":len(tables["website_data"]),"valid_records":max(0,sum(len(v) for k,v in tables.items() if k!="validation_issues")-errors),"warnings":warnings,"errors":errors,"pages_fetched":raw.get("pages_fetched",1),"duration_seconds":round(time.monotonic()-start,3),"timestamp":datetime.now(timezone.utc).isoformat(),"extractor_version":"2.0.0","data_type":s.data_type,"product_limit":"N/A" if s.data_type!="PRODUCTS" else (s.max_products or "ALL"),"extraction_mode":s.extraction_mode,"target_scope":raw.get("target_scope","STORE")}
+    completed=1 if s.data_type=="WEBSITE" else len(tables["categories"]) if s.data_type=="CATEGORIES" else raw.get("products_selected",len(tables["products"]));s.progress_current=completed;s.progress_total=completed;s.progress_percentage=100
     if mode=="MOCK":s.stage="DEMO_MODE";s.message="External store access is unavailable in this Preview environment. These records are MOCK DATA and were not extracted from the submitted store."
-    elif raw.get("timed_out"):s.stage="COMPLETED";s.message="Time limit reached. Completed products were preserved and are ready for review/export."
+    elif raw.get("timed_out"):s.stage="COMPLETED";s.message="Time limit reached. Available records were preserved and are ready for review/export."
     elif errors or raw.get("extraction_failures"):s.stage="PARTIAL_SUCCESS";s.message="Extraction completed with validation errors. Review Validation Issues before export."
     else:s.stage="READY";s.message="Live website data extraction completed." if s.data_type=="WEBSITE" else "Live extraction and validation completed."
     persist_session(s,generate_exports=True)
@@ -73,7 +73,7 @@ async def health():
         scrapling_available=True
     except ImportError:
         scrapling_available=False
-    return {"backend_status":"ok","extractor_version":"1.9.0","external_network_available":"unknown_until_extraction","browser_available":settings.enable_browser_fallback,"scrapling_available":scrapling_available,"data_types":["PRODUCTS","WEBSITE"],"product_limits":[30,50,100,250,"ALL"],"quick_timeout_seconds":settings.extraction_timeout_seconds,"full_timeout_seconds":settings.full_extraction_timeout_seconds,"session_storage":"SQLITE","batch_size":settings.extraction_batch_size,"category_isolation":True,"category_dom_only":True,"rate_limit_pacing":True}
+    return {"backend_status":"ok","extractor_version":"2.0.0","external_network_available":"unknown_until_extraction","browser_available":settings.enable_browser_fallback,"scrapling_available":scrapling_available,"data_types":["PRODUCTS","CATEGORIES","WEBSITE"],"product_limits":[30,50,100,250,"ALL"],"quick_timeout_seconds":settings.extraction_timeout_seconds,"full_timeout_seconds":settings.full_extraction_timeout_seconds,"category_discovery_timeout_seconds":settings.category_discovery_timeout_seconds,"max_categories":settings.max_categories,"max_category_depth":settings.max_category_depth,"session_storage":"SQLITE","batch_size":settings.extraction_batch_size,"data_type_isolation":True,"category_isolation":True,"category_dom_only":True,"rate_limit_pacing":True}
 
 async def run_extraction(sid:str,store_url:str,extraction_mode:str,data_type:str,max_products:int|None):
     s=session_store.get(sid)
@@ -85,7 +85,7 @@ async def run_extraction(sid:str,store_url:str,extraction_mode:str,data_type:str
         url=normalize_url(store_url);validate_public_host(url);s.stage="DISCOVERING";s.message="Discovering public Salla data";persist_session(s)
         s.stage="FETCHING";s.message="Fetching public website data" if data_type=="WEBSITE" else "Fetching public storefront";persist_session(s)
         async def update_progress(current,total):
-            label="website" if data_type=="WEBSITE" else "products"
+            label="website" if data_type=="WEBSITE" else "categories" if data_type=="CATEGORIES" else "products"
             s.progress_current=current;s.progress_total=total;s.progress_percentage=round((current/total)*100,1) if total else 0;s.message=f"Fetching {label}: {current} / {total}";persist_session(s)
         async def save_checkpoint(batch_number,records):
             session_store.save_checkpoint(sid,batch_number,records)
@@ -97,6 +97,10 @@ async def run_extraction(sid:str,store_url:str,extraction_mode:str,data_type:str
             await update_progress(0,1)
             tables,raw=await extract_website_data(url)
             await update_progress(1,1)
+        elif data_type=="CATEGORIES":
+            await update_progress(0,settings.max_categories)
+            tables,raw=await extract_categories_only(url)
+            await update_progress(len(tables.get("categories",[])),len(tables.get("categories",[])) or 1)
         else:
             use_checkpoints=extraction_mode=="FULL" or max_products is None or max_products>settings.quick_products
             tables,raw=await extract_live(url,extraction_mode,update_progress,save_checkpoint if use_checkpoints else None,load_checkpoints if use_checkpoints else None,max_products)
@@ -107,7 +111,7 @@ async def run_extraction(sid:str,store_url:str,extraction_mode:str,data_type:str
         s.stage="ERROR";s.message=str(exc);persist_session(s)
     except ExtractionFailure as exc:
         if exc.environmental and settings.enable_demo_fallback:
-            tables=mock_website_data() if data_type=="WEBSITE" else mock_catalog();finalize(s,tables,{"source":"bundled_mock","target_scope":"WEBSITE" if data_type=="WEBSITE" else "STORE","live_failure_code":exc.code,"pages_fetched":0},"MOCK",start)
+            tables=mock_website_data() if data_type=="WEBSITE" else mock_categories() if data_type=="CATEGORIES" else mock_catalog();finalize(s,tables,{"source":"bundled_mock","target_scope":data_type,"live_failure_code":exc.code,"pages_fetched":0},"MOCK",start)
         else:
             checkpoint_count=session_store.checkpoint_count(sid)
             s.stage="COMPLETED_WITH_ERRORS" if checkpoint_count else "ERROR"
@@ -129,7 +133,7 @@ async def extract(req:ExtractRequest):
     except URLSafetyError as exc:
         raise HTTPException(400,{"code":"INVALID_URL","message":str(exc)})
     sid=str(uuid.uuid4());session_store.clear_checkpoints(sid);session_store.clear_exports(sid)
-    effective_limit=None if req.data_type=="WEBSITE" else (req.max_products if req.max_products is not None else (None if req.extraction_mode=="FULL" else settings.quick_products))
+    effective_limit=None if req.data_type!="PRODUCTS" else (req.max_products if req.max_products is not None else (None if req.extraction_mode=="FULL" else settings.quick_products))
     s=Session(id=sid,stage="VALIDATING_URL",data_type=req.data_type,extraction_mode=req.extraction_mode,max_products=effective_limit,message="Validating public URL");persist_session(s)
     asyncio.create_task(run_extraction(sid,url,req.extraction_mode,req.data_type,effective_limit))
     return {"id":sid,"stage":s.stage,"mode":s.mode,"message":s.message,"stats":s.stats}

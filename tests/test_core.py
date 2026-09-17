@@ -9,7 +9,7 @@ from backend.app.validators.catalog import validate_catalog
 from backend.app.exporters.files import xlsx_bytes, zip_bytes
 from fastapi.testclient import TestClient
 from backend.app.main import app
-from backend.app.extractors.salla import ExtractionFailure, FetchedPage, category_pagination_url_allowed, embedded_json_objects, extract_size_volume, extraction_scope, fetch, parse_sitemap, product_entries_from_dom, rate_limit_delay, source_id_from_url, product_from_page, json_objects, website_data_from_page
+from backend.app.extractors.salla import ExtractionFailure, FetchedPage, categories_from_dom, category_pagination_url_allowed, embedded_json_objects, extract_size_volume, extraction_scope, fetch, parse_sitemap, product_entries_from_dom, rate_limit_delay, source_id_from_url, product_from_page, json_objects, website_data_from_page
 from backend.app.services.session_store import SessionStore
 from backend.app.transformers.products_flat import build_products_flat
 from bs4 import BeautifulSoup
@@ -49,6 +49,12 @@ def test_category_pagination_keeps_path_and_filters():
     assert not category_pagination_url_allowed(exact,"https://shop.example/ar/phones?filters%5Bcategory_id%5D=44&available=1&page=2")
     assert not category_pagination_url_allowed(exact,"https://shop.example/ar/cables?page=2")
     assert not category_pagination_url_allowed(exact,"https://other.example/ar/cables?filters%5Bcategory_id%5D=44&available=1&page=2")
+def test_categories_only_depth_and_count_caps():
+    html='''<header><nav><ul><li><a href="/main/c1">رئيسي</a><ul><li><a href="/child/c2">فرعي</a><ul><li><a href="/deep/c3">عميق</a></li></ul></li></ul></li><li><a href="/other/c4">آخر</a></li></ul></nav></header>'''
+    rows=categories_from_dom(BeautifulSoup(html,"lxml"),"https://shop.example/",50,2)
+    assert [row["Category_ID"] for row in rows]==["1","2","4"]
+    assert next(row for row in rows if row["Category_ID"]=="2")["Parent_Category_ID"]=="1"
+    assert len(categories_from_dom(BeautifulSoup(html,"lxml"),"https://shop.example/",1,2))==1
 def test_jsonld_product_prices_and_public_fields():
     html='''<html><head><script type="application/ld+json">{"@type":"Product","productID":"123","name":"عبوة اختبار","description":"<p>وصف</p>","weight":{"value":500,"unitText":"ml"},"notes":"يحفظ مبرداً","offers":{"price":80,"highPrice":100,"priceCurrency":"SAR","availability":"https://schema.org/InStock","shippingDetails":{"shippingLabel":"جاهز للشحن"}}}</script></head></html>'''
     soup=BeautifulSoup(html,"lxml")
@@ -179,3 +185,20 @@ def test_product_limit_validation_and_persistence(monkeypatch):
         if status["stage"] in {"READY","DEMO_MODE","ERROR"}: break
         time.sleep(.01)
     assert status["max_products"]==50 and status["stats"]["product_limit"]==50
+
+def test_categories_only_demo_stops_before_products(monkeypatch):
+    import backend.app.main as main
+    async def network_blocked(url,*args,**kwargs): raise ExtractionFailure("PREVIEW_NETWORK_RESTRICTED","blocked",True)
+    monkeypatch.setattr(main,"validate_public_host",lambda url:url)
+    monkeypatch.setattr(main,"extract_categories_only",network_blocked)
+    client=TestClient(app)
+    result=client.post("/api/extract",json={"store_url":"https://example.salla.sa/","data_type":"CATEGORIES"})
+    sid=result.json()["id"]
+    for _ in range(50):
+        status=client.get(f"/api/extraction/{sid}").json()
+        if status["stage"] in {"READY","DEMO_MODE","ERROR"}: break
+        time.sleep(.01)
+    payload=client.get(f"/api/extraction/{sid}/tables").json()
+    assert status["data_type"]=="CATEGORIES" and status["max_products"] is None
+    assert len(payload["tables"]["categories"])==5
+    assert payload["tables"]["products"]==[] and payload["tables"]["images"]==[]
