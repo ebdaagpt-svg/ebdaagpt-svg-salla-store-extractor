@@ -160,6 +160,7 @@ function App() {
         ![
           "READY",
           "COMPLETED",
+          "COMPLETED_WITH_ERRORS",
           "PARTIAL_SUCCESS",
           "DEMO_MODE",
           "ERROR",
@@ -210,7 +211,7 @@ function App() {
           <Database size={22} />
           <div>
             <strong>Salla Data Extractor</strong>
-            <small>Migration preparation · v1.4.0</small>
+            <small>Migration preparation · v1.5.0</small>
           </div>
         </div>
         <div className="health">
