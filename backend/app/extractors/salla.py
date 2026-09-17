@@ -238,9 +238,9 @@ def product_from_page(raw: list[dict], soup: BeautifulSoup, url: str, sitemap_en
 
 
 async def discover_sitemaps(client, base_url: str):
-    queue, seen, entries, strategies = [urljoin(base_url, "/sitemap.xml")], set(), [], set()
+    queue, seen, entries, strategies = [(urljoin(base_url, "/sitemap.xml"), 0)], set(), [], set()
     while queue and len(seen) < settings.max_pages:
-        sitemap_url = queue.pop(0)
+        sitemap_url, depth = queue.pop(0)
         if sitemap_url in seen:
             continue
         seen.add(sitemap_url)
@@ -254,8 +254,8 @@ async def discover_sitemaps(client, base_url: str):
         entries.extend(found)
         for child in nested:
             child = urljoin(sitemap_url, child)
-            if child not in seen and len(seen) + len(queue) < settings.max_pages:
-                queue.append(child)
+            if depth < settings.max_sitemap_depth and child not in seen and len(seen) + len(queue) < settings.max_pages:
+                queue.append((child, depth + 1))
     return list({x["url"]: x for x in entries}.values()), len(seen), sorted(strategies)
 
 
