@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from urllib.parse import unquote, urljoin, urlparse
@@ -109,6 +110,18 @@ def json_objects(soup: BeautifulSoup) -> list[dict]:
     return [x for x in out if isinstance(x, dict)]
 
 
+def embedded_json_objects(soup: BeautifulSoup) -> list[dict]:
+    """Read public serialized storefront state without calling private endpoints."""
+    out = json_objects(soup)
+    for node in soup.select('script[type="application/json"],script[id="__NEXT_DATA__"]'):
+        try:
+            value = json.loads(node.string or node.get_text())
+            out.extend(value if isinstance(value, list) else [value])
+        except (TypeError, json.JSONDecodeError):
+            continue
+    return [x for x in out if isinstance(x, dict)]
+
+
 def walk_json(values):
     for value in values:
         if isinstance(value, dict):
@@ -178,7 +191,10 @@ def product_from_page(raw: list[dict], soup: BeautifulSoup, url: str, sitemap_en
     images = [images] if isinstance(images, str) else images
     if not images and sitemap_entry:
         images = sitemap_entry.get("images", [])
-    price = number_or_none(offer.get("price") or offer.get("lowPrice"))
+    current_price = number_or_none(offer.get("price") or offer.get("lowPrice"))
+    original_price = number_or_none(offer.get("highPrice") or (product_obj or {}).get("original_price"))
+    price = original_price if original_price is not None and current_price is not None and original_price >= current_price else current_price
+    sale_price = current_price if price is not None and current_price is not None and current_price < price else None
     if price is None:
         price_meta = soup.select_one('meta[property="product:price:amount"]')
         price = number_or_none(price_meta.get("content") if price_meta else None)
@@ -187,7 +203,16 @@ def product_from_page(raw: list[dict], soup: BeautifulSoup, url: str, sitemap_en
         currency_meta = soup.select_one('meta[property="product:price:currency"]')
         currency = text_or_none(currency_meta.get("content") if currency_meta else None)
     availability = offer.get("availability")
-    product = {"Product_ID": pid, "Title": title, "Slug": slug, "SKU": text_or_none((product_obj or {}).get("sku")), "Barcode": text_or_none((product_obj or {}).get("gtin13") or (product_obj or {}).get("gtin")), "Product_Type": None, "Price": price, "Sale_Price": None, "Currency": currency, "Cost_Price": None, "Quantity": None, "Is_Available": ("InStock" in str(availability)) if availability else None, "Is_Active": True, "Brand": text_or_none(((product_obj or {}).get("brand") or {}).get("name") if isinstance((product_obj or {}).get("brand"), dict) else (product_obj or {}).get("brand")), "Weight": None, "Weight_Unit": None, "Short_Description": None, "Description_HTML": desc, "Description_Text": html_to_text(desc), "Product_URL": canonical, "Created_At": None, "Updated_At": (sitemap_entry or {}).get("lastmod")}
+    weight_obj = (product_obj or {}).get("weight") or (product_obj or {}).get("size")
+    if isinstance(weight_obj, dict):
+        weight, weight_unit = number_or_none(weight_obj.get("value")), text_or_none(weight_obj.get("unitCode") or weight_obj.get("unitText"))
+        size_volume = " ".join(str(x) for x in [weight, weight_unit] if x is not None) or None
+    else:
+        weight, weight_unit, size_volume = number_or_none(weight_obj), None, text_or_none(weight_obj)
+    notes = text_or_none((product_obj or {}).get("notes") or (product_obj or {}).get("disambiguatingDescription"))
+    shipping = (product_obj or {}).get("shippingDetails") or offer.get("shippingDetails")
+    shipping_status = text_or_none(shipping.get("shippingLabel") if isinstance(shipping, dict) else shipping)
+    product = {"Product_ID": pid, "Title": title, "Slug": slug, "SKU": text_or_none((product_obj or {}).get("sku")), "Barcode": text_or_none((product_obj or {}).get("gtin13") or (product_obj or {}).get("gtin")), "Product_Type": None, "Price": price, "Sale_Price": sale_price, "Currency": currency, "Cost_Price": None, "Quantity": None, "Is_Available": ("InStock" in str(availability)) if availability else None, "Is_Active": True, "Brand": text_or_none(((product_obj or {}).get("brand") or {}).get("name") if isinstance((product_obj or {}).get("brand"), dict) else (product_obj or {}).get("brand")), "Weight": weight, "Weight_Unit": weight_unit, "Size_Volume": size_volume, "Notes": notes, "Shipping_Status": shipping_status, "Short_Description": notes, "Description_HTML": desc, "Description_Text": html_to_text(desc), "Product_URL": canonical, "Created_At": None, "Updated_At": (sitemap_entry or {}).get("lastmod")}
     image_rows = [{"Image_ID": stable_id("img", pid, image), "Product_ID": pid, "Image_URL": image, "Alt_Text": title, "Display_Order": order, "Is_Main": order == 1} for order, image in enumerate(dict.fromkeys(urljoin(url, str(x)) for x in images if x), 1)]
     variants = []
     if len(offer_list) > 1:
@@ -235,6 +260,7 @@ async def discover_sitemaps(client, base_url: str):
 
 
 async def extract_live(url: str):
+    deadline = time.monotonic() + settings.extraction_timeout_seconds
     headers = {"User-Agent": settings.user_agent, "Accept": "text/html,application/xhtml+xml,application/xml"}
     async with httpx.AsyncClient(timeout=httpx.Timeout(settings.request_timeout), headers=headers) as client:
         home = await fetch(client, url)
@@ -242,7 +268,11 @@ async def extract_live(url: str):
         if not any(x in marker for x in ["salla", "cdn.salla", "salla.sa", "salla-theme"]):
             raise ExtractionFailure("NOT_SALLA_STORE", "The target does not appear to be a public Salla storefront")
         home_soup = BeautifulSoup(home.text, "lxml")
-        sitemap_entries, sitemap_pages, sitemap_strategies = await discover_sitemaps(client, url)
+        timed_out = False
+        try:
+            sitemap_entries, sitemap_pages, sitemap_strategies = await asyncio.wait_for(discover_sitemaps(client, url), timeout=min(settings.sitemap_timeout_seconds, max(0.1, deadline - time.monotonic())))
+        except asyncio.TimeoutError:
+            sitemap_entries, sitemap_pages, sitemap_strategies, timed_out = [], 0, [], True
         product_entries = [x for x in sitemap_entries if source_id_from_url(x["url"])]
         category_entries = [x for x in sitemap_entries if source_id_from_url(x["url"], CATEGORY_PATH)]
         if not product_entries:
@@ -261,7 +291,7 @@ async def extract_live(url: str):
                 try:
                     page = home if entry["url"].rstrip("/") == url.rstrip("/") else await fetch(client, entry["url"])
                     soup = BeautifulSoup(page.text, "lxml")
-                    parsed = product_from_page(json_objects(soup), soup, page.url, entry)
+                    parsed = product_from_page(embedded_json_objects(soup), soup, page.url, entry)
                     if parsed:
                         results.append((parsed, page.strategy))
                     else:
@@ -271,7 +301,14 @@ async def extract_live(url: str):
                 finally:
                     await asyncio.sleep(settings.request_pacing_seconds)
 
-        await asyncio.gather(*(extract_one(x) for x in product_entries[: settings.max_products]))
+        selected_entries = product_entries[: settings.max_products]
+        tasks = [asyncio.create_task(extract_one(x)) for x in selected_entries]
+        _, pending = await asyncio.wait(tasks, timeout=max(0.1, deadline - time.monotonic()))
+        if pending:
+            timed_out = True
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
         products, images, variants, seo, product_categories = [], [], [], [], []
         strategies = {home.strategy, *sitemap_strategies}
         for parsed, strategy in results:
@@ -295,5 +332,5 @@ async def extract_live(url: str):
         name = text_or_none(home_soup.title.string if home_soup.title else None) or "Salla Store"
         store = [{"Store_ID": stable_id("store", url), "Store_Name": name, "Store_URL": url, "Currency": next((p["Currency"] for p in products if p["Currency"]), None), "Language": home_soup.html.get("lang") if home_soup.html else None, "Extraction_Date": datetime.now(timezone.utc).isoformat(), "Data_Mode": "LIVE", "Extractor_Version": "1.1.0"}]
         tables = {"store": store, "categories": categories, "products": products, "product_categories": product_categories, "images": images, "product_options": [], "option_values": [], "variants": variants, "variant_option_values": [], "tags": [], "product_tags": [], "seo": seo}
-        raw = {"source_url": url, "strategies": sorted(strategies), "pages_fetched": 1 + sitemap_pages + len(results) + len(failures), "sitemap_pages": sitemap_pages, "sitemap_entries": len(sitemap_entries), "products_discovered": len(product_entries), "products_extracted": len(products), "extraction_failures": failures, "safety_truncated": len(product_entries) > settings.max_products}
+        raw = {"source_url": url, "strategies": sorted(strategies), "pages_fetched": 1 + sitemap_pages + len(results) + len(failures), "sitemap_pages": sitemap_pages, "sitemap_entries": len(sitemap_entries), "products_discovered": len(product_entries), "products_selected": len(selected_entries), "products_extracted": len(products), "extraction_failures": failures, "safety_truncated": len(product_entries) > settings.max_products, "timed_out": timed_out, "timeout_seconds": settings.extraction_timeout_seconds}
         return tables, raw
