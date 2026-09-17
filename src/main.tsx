@@ -217,7 +217,7 @@ function App() {
           <Database size={22} />
           <div>
             <strong>Salla Data Extractor</strong>
-            <small>Migration preparation · v1.8.1</small>
+            <small>Migration preparation · v1.9.0</small>
           </div>
         </div>
         <div className="health">

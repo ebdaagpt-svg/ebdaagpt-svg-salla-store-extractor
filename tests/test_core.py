@@ -9,7 +9,7 @@ from backend.app.validators.catalog import validate_catalog
 from backend.app.exporters.files import xlsx_bytes, zip_bytes
 from fastapi.testclient import TestClient
 from backend.app.main import app
-from backend.app.extractors.salla import ExtractionFailure, FetchedPage, embedded_json_objects, extract_size_volume, extraction_scope, fetch, parse_sitemap, product_entries_from_dom, rate_limit_delay, source_id_from_url, product_from_page, json_objects, website_data_from_page
+from backend.app.extractors.salla import ExtractionFailure, FetchedPage, category_pagination_url_allowed, embedded_json_objects, extract_size_volume, extraction_scope, fetch, parse_sitemap, product_entries_from_dom, rate_limit_delay, source_id_from_url, product_from_page, json_objects, website_data_from_page
 from backend.app.services.session_store import SessionStore
 from backend.app.transformers.products_flat import build_products_flat
 from bs4 import BeautifulSoup
@@ -41,8 +41,14 @@ def test_exact_url_scope_and_category_dom_isolation():
     assert extraction_scope("https://shop.example/item/p123")=="PRODUCT"
     assert extraction_scope("https://shop.example/ar/cables/c44")=="CATEGORY"
     assert extraction_scope("https://shop.example/products?filters[category_id]=44")=="CATEGORY"
-    soup=BeautifulSoup('<a href="/unrelated/p999">outside</a><salla-product-card><a href="/inside/p123">inside</a></salla-product-card>',"lxml")
+    soup=BeautifulSoup('<a href="/unrelated/p999">outside</a><main><salla-product-card><a href="/inside/p123">inside</a></salla-product-card></main><script type="application/json">{"url":"/embedded/p777"}</script>',"lxml")
     assert [row["url"] for row in product_entries_from_dom(soup,"https://shop.example/category/c44")]==["https://shop.example/inside/p123"]
+def test_category_pagination_keeps_path_and_filters():
+    exact="https://shop.example/ar/cables?filters%5Bcategory_id%5D=44&available=1"
+    assert category_pagination_url_allowed(exact,"https://shop.example/ar/cables?filters%5Bcategory_id%5D=44&available=1&page=2")
+    assert not category_pagination_url_allowed(exact,"https://shop.example/ar/phones?filters%5Bcategory_id%5D=44&available=1&page=2")
+    assert not category_pagination_url_allowed(exact,"https://shop.example/ar/cables?page=2")
+    assert not category_pagination_url_allowed(exact,"https://other.example/ar/cables?filters%5Bcategory_id%5D=44&available=1&page=2")
 def test_jsonld_product_prices_and_public_fields():
     html='''<html><head><script type="application/ld+json">{"@type":"Product","productID":"123","name":"عبوة اختبار","description":"<p>وصف</p>","weight":{"value":500,"unitText":"ml"},"notes":"يحفظ مبرداً","offers":{"price":80,"highPrice":100,"priceCurrency":"SAR","availability":"https://schema.org/InStock","shippingDetails":{"shippingLabel":"جاهز للشحن"}}}</script></head></html>'''
     soup=BeautifulSoup(html,"lxml")

@@ -321,7 +321,7 @@ def website_data_from_page(raw: list[dict], soup: BeautifulSoup, url: str, strat
         add("Mobile_App_Apple", salla_store["apps"].get("appstore"), "SALLA_PUBLIC_STATE")
         add("Mobile_App_Android", salla_store["apps"].get("googleplay"), "SALLA_PUBLIC_STATE")
 
-    store = [{"Store_ID": str(salla_store.get("id") or stable_id("store", canonical)), "Store_Name": name or "Salla Store", "Store_URL": canonical, "Currency": currency, "Language": soup.html.get("lang") if soup.html else None, "Extraction_Date": datetime.now(timezone.utc).isoformat(), "Data_Mode": "LIVE", "Extractor_Version": "1.8.1"}]
+    store = [{"Store_ID": str(salla_store.get("id") or stable_id("store", canonical)), "Store_Name": name or "Salla Store", "Store_URL": canonical, "Currency": currency, "Language": soup.html.get("lang") if soup.html else None, "Extraction_Date": datetime.now(timezone.utc).isoformat(), "Data_Mode": "LIVE", "Extractor_Version": "1.9.0"}]
     return store, rows
 
 
@@ -379,21 +379,35 @@ def extraction_scope(url: str) -> str:
 
 def product_entries_from_dom(soup: BeautifulSoup, page_url: str) -> list[dict]:
     entries = {}
-    selectors = 'salla-products-list a[href], salla-product-card a[href], .s-product-card a[href], [data-product-id] a[href], [data-product-id][data-url], [product-url]'
-    for node in soup.select(selectors):
+    # Only listing/card DOM is eligible. Do not walk all embedded JSON because
+    # headers, recommendations and analytics can contain store-wide products.
+    containers = soup.select('salla-products-list[source="product.index"], salla-products-list[source*="category" i], main [data-products-list], main .products-list, main .products-grid')
+    nodes = []
+    if containers:
+        for container in containers:
+            nodes.extend(container.select('a[href], [data-product-id][data-url], [product-url]'))
+    else:
+        nodes = soup.select('main salla-product-card a[href], main .s-product-card a[href], main [data-product-id] a[href], main [data-product-id][data-url], main [product-url]')
+    for node in nodes:
         candidate = node.get("href") or node.get("data-url") or node.get("product-url")
         if not candidate:
             continue
         product_url = urljoin(page_url, candidate)
         if source_id_from_url(product_url):
             entries[product_url] = {"url": product_url, "lastmod": None, "images": []}
-    for obj in walk_json(embedded_json_objects(soup)):
-        candidate = obj.get("url") if isinstance(obj, dict) else None
-        if candidate:
-            product_url = urljoin(page_url, candidate)
-            if source_id_from_url(product_url):
-                entries[product_url] = {"url": product_url, "lastmod": None, "images": image_urls(obj.get("image") or obj.get("images"))}
     return list(entries.values())
+
+
+def category_pagination_url_allowed(exact_url: str, candidate_url: str) -> bool:
+    exact, candidate = urlparse(exact_url), urlparse(candidate_url)
+    if candidate.netloc.lower() != exact.netloc.lower():
+        return False
+    if candidate.path.rstrip("/") != exact.path.rstrip("/"):
+        return False
+    pagination_keys = {"page", "p", "offset", "cursor"}
+    required = [(key, value) for key, value in parse_qsl(exact.query, keep_blank_values=True) if key.casefold() not in pagination_keys]
+    candidate_pairs = parse_qsl(candidate.query, keep_blank_values=True)
+    return all(pair in candidate_pairs for pair in required)
 
 
 async def discover_category_products(client, exact_url: str, first_page: FetchedPage, max_pages: int):
@@ -410,7 +424,7 @@ async def discover_category_products(client, exact_url: str, first_page: Fetched
             products[entry["url"]] = entry
         for node in soup.select('link[rel="next"][href], a[rel="next"][href], .pagination a[href]'):
             next_url = urljoin(page.url, node.get("href"))
-            if urlparse(next_url).netloc == urlparse(exact_url).netloc and next_url not in seen:
+            if category_pagination_url_allowed(exact_url, next_url) and next_url not in seen:
                 queue.append((next_url, None))
     return list(products.values()), len(seen), sorted(strategies)
 
@@ -694,7 +708,7 @@ async def extract_live(url: str, extraction_mode: str = "QUICK", progress_callba
         if not products:
             raise ExtractionFailure("UNSUPPORTED_STRUCTURE", "Salla storefront detected, but no public product records could be structured")
         name = text_or_none(home_soup.title.string if home_soup.title else None) or "Salla Store"
-        store = [{"Store_ID": stable_id("store", url), "Store_Name": name, "Store_URL": url, "Currency": next((p["Currency"] for p in products if p["Currency"]), None), "Language": home_soup.html.get("lang") if home_soup.html else None, "Extraction_Date": datetime.now(timezone.utc).isoformat(), "Data_Mode": "LIVE", "Extractor_Version": "1.8.1"}]
+        store = [{"Store_ID": stable_id("store", url), "Store_Name": name, "Store_URL": url, "Currency": next((p["Currency"] for p in products if p["Currency"]), None), "Language": home_soup.html.get("lang") if home_soup.html else None, "Extraction_Date": datetime.now(timezone.utc).isoformat(), "Data_Mode": "LIVE", "Extractor_Version": "1.9.0"}]
         tables = {"store": store, "categories": categories, "products": products, "product_categories": product_categories, "images": images, "product_options": [], "option_values": [], "variants": variants, "variant_option_values": [], "tags": [], "product_tags": [], "seo": seo}
-        raw = {"source_url": url, "target_scope": scope, "exact_url_preserved": True, "extraction_mode": extraction_mode, "max_products": max_products, "strategies": sorted(strategies), "pages_fetched": 1 + sitemap_pages + len(results) + len(failures), "sitemap_pages": sitemap_pages, "sitemap_entries": len(sitemap_entries), "products_discovered": len(product_entries), "products_selected": len(selected_entries), "products_extracted": len(products), "extraction_failures": list(failures.values()), "safety_truncated": max_products is not None and len(product_entries) > max_products, "timed_out": timed_out, "timeout_seconds": timeout_seconds}
+        raw = {"source_url": url, "requested_url": url, "target_scope": scope, "exact_url_preserved": True, "session_cache_reset": True, "category_isolation": scope == "CATEGORY", "store_sitemap_fallback_used": scope == "STORE", "extraction_mode": extraction_mode, "max_products": max_products, "strategies": sorted(strategies), "pages_fetched": 1 + sitemap_pages + len(results) + len(failures), "sitemap_pages": sitemap_pages, "sitemap_entries": len(sitemap_entries), "products_discovered": len(product_entries), "products_selected": len(selected_entries), "products_extracted": len(products), "extraction_failures": list(failures.values()), "safety_truncated": max_products is not None and len(product_entries) > max_products, "timed_out": timed_out, "timeout_seconds": timeout_seconds}
         return tables, raw
