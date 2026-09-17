@@ -48,3 +48,17 @@ class SessionStore:
         with self._lock, self._connect() as db:
             row = db.execute("SELECT payload FROM extraction_exports WHERE session_id=? AND kind=?", (session_id, kind)).fetchone()
         return bytes(row[0]) if row else None
+
+    def recover_interrupted(self) -> int:
+        terminal = {"READY", "COMPLETED", "PARTIAL_SUCCESS", "DEMO_MODE", "ERROR"}
+        with self._lock, self._connect() as db:
+            rows = db.execute("SELECT payload FROM extraction_sessions").fetchall()
+        recovered = 0
+        for row in rows:
+            session = Session.model_validate_json(row[0])
+            if session.stage not in terminal:
+                session.stage = "ERROR"
+                session.message = "Extraction was interrupted by a server restart. Start a new extraction to continue."
+                self.save(session)
+                recovered += 1
+        return recovered
