@@ -36,7 +36,9 @@ Excel contains README plus Store, Categories, Products, Product Categories, Imag
 
 Copy `.env.example` to `.env` to override safe defaults. No secrets are required. Browser automation is disabled and is not needed to start the application.
 
-Fast-preview defaults limit each run to 25 product pages and 60 seconds. Sitemap discovery receives at most 15 seconds of that same budget. If the deadline is reached, completed records remain exportable and the session enters the terminal `COMPLETED` state.
+Fast-preview defaults limit each run to 25 product pages and 45 seconds. Sitemap discovery receives at most 15 seconds of that same budget and is capped at eight sitemap documents/two nested levels. If the deadline is reached, completed records remain exportable and the session enters the terminal `COMPLETED` state.
+
+Extraction sessions and pre-generated XLSX/CSV ZIP artifacts are stored in SQLite (`SESSION_DB_PATH`). Use a persistent Railway volume mounted at `/data` with `SESSION_DB_PATH=/data/extractions.sqlite3` to preserve sessions across deployments as well as process restarts.
 
 ## Tests
 
@@ -49,7 +51,7 @@ npm run build
 
 - Public storefront structure varies by Salla theme and can change. Products absent from public Sitemaps/JSON-LD/OpenGraph may be reported as partial or unsupported rather than fabricated.
 - Private admin data, costs, inventory details, and records requiring authentication cannot be extracted without an officially authorized API integration.
-- In-memory extraction sessions are lost on backend restart.
+- SQLite sessions persist across process restarts. Persistence across Railway deployments requires the configured `/data` volume.
 
 ## Scrapling integration
 
