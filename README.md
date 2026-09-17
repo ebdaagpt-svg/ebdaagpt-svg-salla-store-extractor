@@ -57,6 +57,8 @@ npm run build
 
 The API uses Scrapling's static HTTP fetcher first with bounded retries, then falls back to `httpx`. It reads public JSON-LD and serialized page state, but does not bypass authentication, CAPTCHAs, Cloudflare challenges, or access controls. Redirects are handled manually and every redirect target passes the existing SSRF checks. Browser rendering remains disabled by default.
 
+HTTP 429 responses are retried up to three times with bounded exponential backoff (3, 4.5, then 5 seconds) while honoring a larger numeric `Retry-After` value. Requests use randomized 0.3–0.8 second pacing and a stable, transparent extractor User-Agent; identity/header rotation is intentionally not used.
+
 To deploy the official Scrapling MCP server, create a second Railway service from this repository, select `Dockerfile.mcp` (or use `railway-mcp.json`), and set a long random `SCRAPLING_MCP_AUTH_TOKEN`. Give that service its own public domain. The Streamable HTTP endpoint is:
 
 `https://<mcp-service-domain>/mcp`
