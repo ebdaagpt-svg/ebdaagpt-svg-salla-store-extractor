@@ -1,4 +1,5 @@
 import asyncio
+import gc
 import json
 import logging
 import random
@@ -352,7 +353,7 @@ async def discover_sitemaps(client, base_url: str, max_pages: int, max_depth: in
     return list({x["url"]: x for x in entries}.values()), len(seen), sorted(strategies)
 
 
-async def extract_live(url: str, extraction_mode: str = "QUICK", progress_callback=None):
+async def extract_live(url: str, extraction_mode: str = "QUICK", progress_callback=None, checkpoint_callback=None, checkpoint_loader=None):
     is_full = extraction_mode == "FULL"
     timeout_seconds = settings.full_extraction_timeout_seconds if is_full else settings.extraction_timeout_seconds
     deadline = time.monotonic() + timeout_seconds
@@ -382,7 +383,7 @@ async def extract_live(url: str, extraction_mode: str = "QUICK", progress_callba
             row = {"Category_ID": cid, "Parent_Category_ID": None, "Name": name or cid, "Slug": slug, "URL": entry["url"], "Description": None, "Display_Order": order, "Is_Active": True}
             categories.append(row)
             category_by_url[entry["url"].rstrip("/")] = row
-        semaphore, failures, results = asyncio.Semaphore(settings.max_concurrent_requests), {}, {}
+        semaphore, failures, results, processed_urls = asyncio.Semaphore(settings.max_concurrent_requests), {}, {}, set()
 
         async def extract_one(entry):
             async with semaphore:
@@ -398,6 +399,7 @@ async def extract_live(url: str, extraction_mode: str = "QUICK", progress_callba
                 except Exception as exc:
                     failures[entry["url"]] = {"url": entry["url"], "code": getattr(exc, "code", "PARSING_ERROR"), "message": str(exc)[:240]}
                 finally:
+                    processed_urls.add(entry["url"])
                     await asyncio.sleep(random.uniform(settings.request_pacing_min_seconds, settings.request_pacing_max_seconds))
 
         selected_entries = product_entries if max_products is None else product_entries[:max_products]
@@ -405,8 +407,9 @@ async def extract_live(url: str, extraction_mode: str = "QUICK", progress_callba
         if progress_callback:
             await progress_callback(0, total)
 
+        batch_number = 0
         async def run_batches(entries):
-            nonlocal timed_out
+            nonlocal timed_out, batch_number
             for offset in range(0, len(entries), settings.extraction_batch_size):
                 if time.monotonic() >= deadline:
                     timed_out = True; break
@@ -417,8 +420,14 @@ async def extract_live(url: str, extraction_mode: str = "QUICK", progress_callba
                     timed_out = True
                     for task in pending: task.cancel()
                     await asyncio.gather(*pending, return_exceptions=True)
+                batch_number += 1
+                if checkpoint_callback:
+                    completed = {entry["url"]: results.pop(entry["url"]) for entry in batch if entry["url"] in results}
+                    await checkpoint_callback(batch_number, completed)
+                    completed.clear()
+                    gc.collect()
                 if progress_callback:
-                    await progress_callback(min(len(results) + len(failures), total), total)
+                    await progress_callback(min(len(processed_urls), total), total)
                 if timed_out: break
 
         await run_batches(selected_entries)
@@ -426,6 +435,9 @@ async def extract_live(url: str, extraction_mode: str = "QUICK", progress_callba
         if failures and not timed_out:
             retry_entries = [entry for entry in selected_entries if entry["url"] in failures]
             await run_batches(retry_entries)
+        if checkpoint_loader:
+            for checkpoint in await checkpoint_loader():
+                results.update(checkpoint)
         products, images, variants, seo, product_categories = [], [], [], [], []
         strategies = {home.strategy, *sitemap_strategies}
         for parsed, strategy in results.values():
@@ -447,7 +459,7 @@ async def extract_live(url: str, extraction_mode: str = "QUICK", progress_callba
         if not products:
             raise ExtractionFailure("UNSUPPORTED_STRUCTURE", "Salla storefront detected, but no public product records could be structured")
         name = text_or_none(home_soup.title.string if home_soup.title else None) or "Salla Store"
-        store = [{"Store_ID": stable_id("store", url), "Store_Name": name, "Store_URL": url, "Currency": next((p["Currency"] for p in products if p["Currency"]), None), "Language": home_soup.html.get("lang") if home_soup.html else None, "Extraction_Date": datetime.now(timezone.utc).isoformat(), "Data_Mode": "LIVE", "Extractor_Version": "1.4.0"}]
+        store = [{"Store_ID": stable_id("store", url), "Store_Name": name, "Store_URL": url, "Currency": next((p["Currency"] for p in products if p["Currency"]), None), "Language": home_soup.html.get("lang") if home_soup.html else None, "Extraction_Date": datetime.now(timezone.utc).isoformat(), "Data_Mode": "LIVE", "Extractor_Version": "1.5.0"}]
         tables = {"store": store, "categories": categories, "products": products, "product_categories": product_categories, "images": images, "product_options": [], "option_values": [], "variants": variants, "variant_option_values": [], "tags": [], "product_tags": [], "seo": seo}
         raw = {"source_url": url, "extraction_mode": extraction_mode, "strategies": sorted(strategies), "pages_fetched": 1 + sitemap_pages + len(results) + len(failures), "sitemap_pages": sitemap_pages, "sitemap_entries": len(sitemap_entries), "products_discovered": len(product_entries), "products_selected": len(selected_entries), "products_extracted": len(products), "extraction_failures": list(failures.values()), "safety_truncated": max_products is not None and len(product_entries) > max_products, "timed_out": timed_out, "timeout_seconds": timeout_seconds}
         return tables, raw
