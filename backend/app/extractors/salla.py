@@ -120,6 +120,17 @@ def embedded_json_objects(soup: BeautifulSoup) -> list[dict]:
             out.extend(value if isinstance(value, list) else [value])
         except (TypeError, json.JSONDecodeError):
             continue
+    # Salla exposes product/category analytics as a public JSON object.
+    for node in soup.find_all("script"):
+        script = node.string or node.get_text()
+        if "dataLayer.push(" not in script:
+            continue
+        for match in re.finditer(r"dataLayer\.push\((\{.*?\})\);", script, re.DOTALL):
+            try:
+                value = json.loads(match.group(1))
+                if isinstance(value, dict): out.append(value)
+            except json.JSONDecodeError:
+                continue
     return [x for x in out if isinstance(x, dict)]
 
 
@@ -213,6 +224,7 @@ def product_from_page(raw: list[dict], soup: BeautifulSoup, url: str, sitemap_en
     if not title or not source_id:
         return None
     pid = str(source_id)
+    public_record = next((x for x in walk_json(raw) if str(x.get("id", "")) == pid and any(k in x for k in ("categories", "category", "images", "image"))), {})
     offers = (product_obj or {}).get("offers") or {}
     offer_list = offers if isinstance(offers, list) else [offers]
     offer = next((x for x in offer_list if isinstance(x, dict)), {})
@@ -224,6 +236,8 @@ def product_from_page(raw: list[dict], soup: BeautifulSoup, url: str, sitemap_en
     canonical = urljoin(url, canonical_node.get("href")) if canonical_node and canonical_node.get("href") else url
     slug, _ = slug_name(canonical)
     images = image_urls((product_obj or {}).get("image"))
+    for key in ("image", "images", "gallery", "photos"):
+        images.extend(image_urls(public_record.get(key)))
     for candidate in walk_json(raw):
         if candidate is product_obj or str(candidate.get("@type", "")).lower() == "product":
             for key in ("images", "gallery", "photos"):
@@ -251,7 +265,7 @@ def product_from_page(raw: list[dict], soup: BeautifulSoup, url: str, sitemap_en
     else:
         weight, weight_unit, size_volume = number_or_none(weight_obj), None, text_or_none(weight_obj)
     size_volume = size_volume or extract_size_volume(title, desc)
-    notes = text_or_none((product_obj or {}).get("notes") or (product_obj or {}).get("disambiguatingDescription"))
+    notes = text_or_none((product_obj or {}).get("notes") or public_record.get("notes") or (product_obj or {}).get("disambiguatingDescription"))
     shipping = (product_obj or {}).get("shippingDetails") or offer.get("shippingDetails")
     shipping_status = text_or_none(shipping.get("shippingLabel") if isinstance(shipping, dict) else shipping)
     product = {"Product_ID": pid, "Title": title, "Slug": slug, "SKU": text_or_none((product_obj or {}).get("sku")), "Barcode": text_or_none((product_obj or {}).get("gtin13") or (product_obj or {}).get("gtin")), "Product_Type": None, "Price": price, "Sale_Price": sale_price, "Currency": currency, "Cost_Price": None, "Quantity": None, "Is_Available": ("InStock" in str(availability)) if availability else None, "Is_Active": True, "Brand": text_or_none(((product_obj or {}).get("brand") or {}).get("name") if isinstance((product_obj or {}).get("brand"), dict) else (product_obj or {}).get("brand")), "Weight": weight, "Weight_Unit": weight_unit, "Size_Volume": size_volume, "Notes": notes, "Shipping_Status": shipping_status, "Short_Description": notes, "Description_HTML": desc, "Description_Text": html_to_text(desc), "Product_URL": canonical, "Created_At": None, "Updated_At": (sitemap_entry or {}).get("lastmod")}
@@ -287,6 +301,11 @@ def product_from_page(raw: list[dict], soup: BeautifulSoup, url: str, sitemap_en
         category_url = category_value.get("url") if isinstance(category_value, dict) else None
         if category_name:
             breadcrumbs.append((category_name, urljoin(url, category_url) if category_url else ""))
+    for category in public_record.get("categories", []) if isinstance(public_record.get("categories"), list) else []:
+        if not isinstance(category, dict): continue
+        category_name, category_id = text_or_none(category.get("name")), category.get("id")
+        if category_name and category_id:
+            breadcrumbs.append((category_name, urljoin(url, f"/c{category_id}")))
     return product, image_rows, variants, seo, breadcrumbs
 
 
