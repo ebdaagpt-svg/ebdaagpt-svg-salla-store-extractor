@@ -13,8 +13,11 @@ class Settings(BaseSettings):
     full_extraction_timeout_seconds: float = 1800
     extraction_batch_size: int = 25
     sitemap_timeout_seconds: float = 15
-    request_pacing_seconds: float = 0.35
-    user_agent: str = "SallaMigrationExtractor/1.0"
+    request_pacing_min_seconds: float = 0.3
+    request_pacing_max_seconds: float = 0.8
+    rate_limit_backoff_min_seconds: float = 3
+    rate_limit_backoff_max_seconds: float = 5
+    user_agent: str = "SallaMigrationExtractor/1.4 (+public-catalog-migration)"
     enable_browser_fallback: bool = False
     enable_scrapling: bool = True
     enable_demo_fallback: bool = True
