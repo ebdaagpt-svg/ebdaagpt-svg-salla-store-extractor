@@ -18,6 +18,9 @@ logging.basicConfig(level=logging.INFO,format="%(asctime)s %(levelname)s %(name)
 app=FastAPI(title="Salla Store Extractor",version="1.4.0")
 app.add_middleware(CORSMiddleware,allow_origins=["http://localhost:5173","http://127.0.0.1:5173"],allow_methods=["*"],allow_headers=["*"])
 session_store=SessionStore(settings.session_db_path)
+recovered_sessions=session_store.recover_interrupted()
+if recovered_sessions:
+    logging.warning("Marked %s interrupted extraction session(s) as ERROR",recovered_sessions)
 
 @app.exception_handler(HTTPException)
 async def http_error_handler(_:Request,exc:HTTPException):
