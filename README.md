@@ -36,7 +36,7 @@ Excel contains README plus Store, Categories, Products, Product Categories, Imag
 
 Copy `.env.example` to `.env` to override safe defaults. No secrets are required. Browser automation is disabled and is not needed to start the application.
 
-Quick Extract is the default and processes the first 30 public product pages within 45 seconds. Full Extract has no product-count cap, walks up to 100 sitemap documents/five nested levels, processes URLs in bounded batches, and runs as a persisted background session with live percentage progress. A 30-minute safety deadline prevents abandoned full jobs from running indefinitely; completed records remain exportable in terminal `COMPLETED` state.
+Quick Extract is the default and processes the first 30 public product pages within 45 seconds. Full Extract has no product-count cap, walks up to 100 sitemap documents/five nested levels, processes URLs in batches of 40, and runs as a persisted background session with live percentage progress. Each completed batch is checkpointed to SQLite and released from working memory. A 30-minute safety deadline prevents abandoned full jobs from running indefinitely; completed records remain exportable in terminal `COMPLETED` state. Unexpected failures after a checkpoint end as `COMPLETED_WITH_ERRORS` instead of breaking status polling.
 
 Extraction sessions and pre-generated XLSX/CSV ZIP artifacts are stored in SQLite (`SESSION_DB_PATH`). Use a persistent Railway volume mounted at `/data` with `SESSION_DB_PATH=/data/extractions.sqlite3` to preserve sessions across deployments as well as process restarts.
 
