@@ -9,7 +9,7 @@ from backend.app.validators.catalog import validate_catalog
 from backend.app.exporters.files import xlsx_bytes, zip_bytes
 from fastapi.testclient import TestClient
 from backend.app.main import app
-from backend.app.extractors.salla import ExtractionFailure, extract_size_volume, parse_sitemap, source_id_from_url, product_from_page, json_objects
+from backend.app.extractors.salla import ExtractionFailure, embedded_json_objects, extract_size_volume, parse_sitemap, source_id_from_url, product_from_page, json_objects
 from backend.app.services.session_store import SessionStore
 from bs4 import BeautifulSoup
 
@@ -44,6 +44,11 @@ def test_jsonld_product_prices_and_public_fields():
 def test_size_volume_regex():
     assert extract_size_volume("عطر مركز 100 مل")=="100 مل"
     assert extract_size_volume("Bottle 80ML")=="80 ML"
+def test_public_salla_datalayer_categories():
+    html='''<html><head><script type="application/ld+json">{"@type":"Product","productID":"123","name":"منتج","offers":{"price":10}}</script></head><body><script>window.dataLayer.push({"event":"detail","ecommerce":{"detail":{"products":[{"id":123,"name":"منتج","categories":[{"id":44,"name":"العناية"}]}]}}});</script></body></html>'''
+    soup=BeautifulSoup(html,"lxml")
+    parsed=product_from_page(embedded_json_objects(soup),soup,"https://shop.example/item/p123")
+    assert parsed and parsed[-1]==[("العناية","https://shop.example/c44")]
 def test_relationships_and_demo_warnings():
     issues=validate_catalog(mock_catalog()); assert any(x.Field=="SKU" for x in issues) and any(x.Field=="Images" for x in issues)
 def test_excel_generation():
