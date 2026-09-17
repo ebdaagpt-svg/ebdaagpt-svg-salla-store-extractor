@@ -38,23 +38,30 @@ async def _scrapling_fetch(url: str) -> FetchedPage:
     """Fetch with browser impersonation while validating every redirect target."""
     from scrapling.fetchers import AsyncFetcher
 
-    current = validate_public_host(url)
-    for _ in range(4):
-        page = await AsyncFetcher.get(current, follow_redirects=False, timeout=settings.request_timeout, retries=settings.max_retries, headers={"User-Agent": settings.user_agent})
-        status = int(page.status)
-        headers = {str(k).lower(): str(v) for k, v in dict(page.headers or {}).items()}
-        if status in {301, 302, 303, 307, 308}:
-            current = safe_redirect(current, headers.get("location", ""))
-            continue
-        if status == 429:
-            raise ExtractionFailure("RATE_LIMITED", "The storefront rate-limited extraction")
-        if status in {401, 403}:
-            raise ExtractionFailure("ACCESS_DENIED", "The public storefront denied access")
-        if status >= 400:
-            raise ExtractionFailure("NETWORK_ERROR", f"Storefront returned HTTP {status}")
-        encoding = getattr(page, "encoding", None) or "utf-8"
-        return FetchedPage(page.body.decode(encoding, errors="replace"), headers, status, "SCRAPLING_HTTP", current)
-    raise ExtractionFailure("ACCESS_DENIED", "Too many redirects")
+    for attempt in range(settings.max_retries + 1):
+        current = validate_public_host(url)
+        for _ in range(4):
+            page = await AsyncFetcher.get(current, follow_redirects=False, timeout=settings.request_timeout, retries=0, headers={"User-Agent": settings.user_agent})
+            status = int(page.status)
+            headers = {str(k).lower(): str(v) for k, v in dict(page.headers or {}).items()}
+            if status in {301, 302, 303, 307, 308}:
+                current = safe_redirect(current, headers.get("location", ""))
+                continue
+            if status == 429:
+                if attempt < settings.max_retries:
+                    retry_after = number_or_none(headers.get("retry-after"))
+                    await asyncio.sleep(max(retry_after or 0, 1.5 * (2**attempt)))
+                    break
+                raise ExtractionFailure("RATE_LIMITED", "The storefront rate-limited extraction")
+            if status in {401, 403}:
+                raise ExtractionFailure("ACCESS_DENIED", "The public storefront denied access")
+            if status >= 400:
+                raise ExtractionFailure("NETWORK_ERROR", f"Storefront returned HTTP {status}")
+            encoding = getattr(page, "encoding", None) or "utf-8"
+            return FetchedPage(page.body.decode(encoding, errors="replace"), headers, status, "SCRAPLING_HTTP", current)
+        else:
+            raise ExtractionFailure("ACCESS_DENIED", "Too many redirects")
+    raise ExtractionFailure("RATE_LIMITED", "The storefront rate-limited extraction")
 
 
 async def fetch(client: httpx.AsyncClient, url: str) -> FetchedPage:
