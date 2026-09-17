@@ -1,0 +1,50 @@
+import sqlite3
+import threading
+from pathlib import Path
+
+from backend.app.models import Session
+
+
+class SessionStore:
+    """SQLite-backed extraction sessions and generated export artifacts."""
+
+    def __init__(self, db_path: str):
+        self.path = Path(db_path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.RLock()
+        self._initialize()
+
+    def _connect(self):
+        connection = sqlite3.connect(self.path, timeout=10)
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("PRAGMA busy_timeout=10000")
+        return connection
+
+    def _initialize(self):
+        with self._lock, self._connect() as db:
+            db.execute("CREATE TABLE IF NOT EXISTS extraction_sessions (id TEXT PRIMARY KEY, payload TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
+            db.execute("CREATE TABLE IF NOT EXISTS extraction_exports (session_id TEXT NOT NULL, kind TEXT NOT NULL, payload BLOB NOT NULL, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(session_id, kind))")
+
+    def save(self, session: Session):
+        with self._lock, self._connect() as db:
+            db.execute(
+                "INSERT INTO extraction_sessions(id,payload,updated_at) VALUES(?,?,CURRENT_TIMESTAMP) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,updated_at=CURRENT_TIMESTAMP",
+                (session.id, session.model_dump_json()),
+            )
+
+    def get(self, session_id: str) -> Session | None:
+        with self._lock, self._connect() as db:
+            row = db.execute("SELECT payload FROM extraction_sessions WHERE id=?", (session_id,)).fetchone()
+        return Session.model_validate_json(row[0]) if row else None
+
+    def save_export(self, session_id: str, kind: str, payload: bytes):
+        with self._lock, self._connect() as db:
+            db.execute(
+                "INSERT INTO extraction_exports(session_id,kind,payload,updated_at) VALUES(?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(session_id,kind) DO UPDATE SET payload=excluded.payload,updated_at=CURRENT_TIMESTAMP",
+                (session_id, kind, payload),
+            )
+
+    def get_export(self, session_id: str, kind: str) -> bytes | None:
+        with self._lock, self._connect() as db:
+            row = db.execute("SELECT payload FROM extraction_exports WHERE session_id=? AND kind=?", (session_id, kind)).fetchone()
+        return bytes(row[0]) if row else None
