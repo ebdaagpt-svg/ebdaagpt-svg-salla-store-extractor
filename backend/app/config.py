@@ -4,10 +4,14 @@ class Settings(BaseSettings):
     request_timeout: float = 12
     max_retries: int = 3
     max_concurrent_requests: int = 2
-    max_pages: int = 8
-    max_sitemap_depth: int = 2
-    max_products: int = 25
+    max_pages: int = 100
+    max_sitemap_depth: int = 5
+    quick_max_pages: int = 8
+    quick_sitemap_depth: int = 2
+    quick_products: int = 30
     extraction_timeout_seconds: float = 45
+    full_extraction_timeout_seconds: float = 1800
+    extraction_batch_size: int = 25
     sitemap_timeout_seconds: float = 15
     request_pacing_seconds: float = 0.35
     user_agent: str = "SallaMigrationExtractor/1.0"
