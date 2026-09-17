@@ -14,7 +14,7 @@ from backend.app.validators.catalog import validate_catalog
 from backend.app.exporters.files import xlsx_bytes, zip_bytes
 
 logging.basicConfig(level=logging.INFO,format="%(asctime)s %(levelname)s %(name)s %(message)s")
-app=FastAPI(title="Salla Store Extractor",version="1.1.0")
+app=FastAPI(title="Salla Store Extractor",version="1.2.0")
 app.add_middleware(CORSMiddleware,allow_origins=["http://localhost:5173","http://127.0.0.1:5173"],allow_methods=["*"],allow_headers=["*"])
 sessions:dict[str,Session]={}
 
@@ -27,12 +27,16 @@ def finalize(s,tables,raw,mode,start):
     if raw.get("safety_truncated"):
         from backend.app.models import Issue
         issues.append(Issue(Severity="WARNING",Entity_Type="CATALOG",Entity_ID=None,Field="Pagination",Issue="Product safety limit reached; increase MAX_PRODUCTS to continue",Original_Value=settings.max_products))
+    if raw.get("timed_out"):
+        from backend.app.models import Issue
+        issues.append(Issue(Severity="WARNING",Entity_Type="CATALOG",Entity_ID=None,Field="Timeout",Issue="Extraction time limit reached; completed records were preserved",Original_Value=raw.get("timeout_seconds")))
     tables["validation_issues"]=[x.model_dump() for x in issues]
     s.tables=tables;s.raw_data=raw;s.issues=issues;s.mode=mode
     errors=sum(x.Severity=="ERROR" for x in issues); warnings=sum(x.Severity=="WARNING" for x in issues)
-    s.stats={"categories":len(tables["categories"]),"products":len(tables["products"]),"variants":len(tables["variants"]),"images":len(tables["images"]),"valid_records":max(0,sum(len(v) for k,v in tables.items() if k!="validation_issues")-errors),"warnings":warnings,"errors":errors,"pages_fetched":raw.get("pages_fetched",1),"duration_seconds":round(time.monotonic()-start,3),"timestamp":datetime.now(timezone.utc).isoformat(),"extractor_version":"1.1.0"}
+    s.stats={"categories":len(tables["categories"]),"products":len(tables["products"]),"variants":len(tables["variants"]),"images":len(tables["images"]),"valid_records":max(0,sum(len(v) for k,v in tables.items() if k!="validation_issues")-errors),"warnings":warnings,"errors":errors,"pages_fetched":raw.get("pages_fetched",1),"duration_seconds":round(time.monotonic()-start,3),"timestamp":datetime.now(timezone.utc).isoformat(),"extractor_version":"1.2.0"}
     s.progress_current=len(tables["products"]);s.progress_total=len(tables["products"])
     if mode=="MOCK":s.stage="DEMO_MODE";s.message="External store access is unavailable in this Preview environment. These records are MOCK DATA and were not extracted from the submitted store."
+    elif raw.get("timed_out"):s.stage="COMPLETED";s.message="Time limit reached. Completed products were preserved and are ready for review/export."
     elif errors or raw.get("extraction_failures"):s.stage="PARTIAL_SUCCESS";s.message="Extraction completed with validation errors. Review Validation Issues before export."
     else:s.stage="READY";s.message="Live extraction and validation completed."
 
@@ -43,7 +47,7 @@ async def health():
         scrapling_available=True
     except ImportError:
         scrapling_available=False
-    return {"backend_status":"ok","extractor_version":"1.1.0","external_network_available":"unknown_until_extraction","browser_available":settings.enable_browser_fallback,"scrapling_available":scrapling_available}
+    return {"backend_status":"ok","extractor_version":"1.2.0","external_network_available":"unknown_until_extraction","browser_available":settings.enable_browser_fallback,"scrapling_available":scrapling_available,"max_products":settings.max_products,"extraction_timeout_seconds":settings.extraction_timeout_seconds}
 
 async def run_extraction(sid:str,store_url:str):
     s=sessions[sid];start=time.monotonic()
@@ -85,12 +89,12 @@ async def tables(sid:str):
 @app.get("/api/extraction/{sid}/export/xlsx")
 async def export_xlsx(sid:str):
     s=get_session(sid)
-    if s.stage not in {"READY","PARTIAL_SUCCESS","DEMO_MODE"}:raise HTTPException(409,"Export is unavailable until validation completes")
+    if s.stage not in {"READY","COMPLETED","PARTIAL_SUCCESS","DEMO_MODE"}:raise HTTPException(409,"Export is unavailable until validation completes")
     stamp=datetime.now().strftime("%Y-%m-%d_%H-%M");return Response(xlsx_bytes(s),media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",headers={"Content-Disposition":f'attachment; filename="salla_store_export_{stamp}.xlsx"'})
 @app.get("/api/extraction/{sid}/export/csv")
 async def export_csv(sid:str):
     s=get_session(sid)
-    if s.stage not in {"READY","PARTIAL_SUCCESS","DEMO_MODE"}:raise HTTPException(409,"Export is unavailable until validation completes")
+    if s.stage not in {"READY","COMPLETED","PARTIAL_SUCCESS","DEMO_MODE"}:raise HTTPException(409,"Export is unavailable until validation completes")
     stamp=datetime.now().strftime("%Y-%m-%d_%H-%M");return Response(zip_bytes(s),media_type="application/zip",headers={"Content-Disposition":f'attachment; filename="salla_store_export_{stamp}.zip"'})
 
 # In production FastAPI serves the compiled React app from the same origin.
