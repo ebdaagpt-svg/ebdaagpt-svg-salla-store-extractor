@@ -9,7 +9,7 @@ from backend.app.validators.catalog import validate_catalog
 from backend.app.exporters.files import xlsx_bytes, zip_bytes
 from fastapi.testclient import TestClient
 from backend.app.main import app
-from backend.app.extractors.salla import ExtractionFailure, embedded_json_objects, extract_size_volume, parse_sitemap, source_id_from_url, product_from_page, json_objects
+from backend.app.extractors.salla import ExtractionFailure, embedded_json_objects, extract_size_volume, parse_sitemap, rate_limit_delay, source_id_from_url, product_from_page, json_objects
 from backend.app.services.session_store import SessionStore
 from bs4 import BeautifulSoup
 
@@ -44,6 +44,11 @@ def test_jsonld_product_prices_and_public_fields():
 def test_size_volume_regex():
     assert extract_size_volume("عطر مركز 100 مل")=="100 مل"
     assert extract_size_volume("Bottle 80ML")=="80 ML"
+def test_rate_limit_backoff_and_retry_after():
+    assert rate_limit_delay({},0)==3
+    assert rate_limit_delay({},1)==4.5
+    assert rate_limit_delay({},2)==5
+    assert rate_limit_delay({"retry-after":"9"},0)==9
 def test_public_salla_datalayer_categories():
     html='''<html><head><script type="application/ld+json">{"@type":"Product","productID":"123","name":"منتج","offers":{"price":10}}</script></head><body><script>window.dataLayer.push({"event":"detail","ecommerce":{"detail":{"products":[{"id":123,"name":"منتج","categories":[{"id":44,"name":"العناية"}]}]}}});</script></body></html>'''
     soup=BeautifulSoup(html,"lxml")
@@ -63,6 +68,9 @@ def test_sqlite_session_and_export_persistence():
         restarted=SessionStore(path)
         assert restarted.get(current.id).stage=="DEMO_MODE"
         assert restarted.get_export(current.id,"csv")==b"PK-test"
+        active=Session(id="active",stage="FETCHING",message="working"); restarted.save(active)
+        assert restarted.recover_interrupted()==1
+        assert restarted.get("active").stage=="ERROR"
 
 def test_demo_mode_end_to_end(monkeypatch):
     import backend.app.main as main
