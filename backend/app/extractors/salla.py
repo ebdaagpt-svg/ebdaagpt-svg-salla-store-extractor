@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import random
 import re
 import time
 from dataclasses import dataclass
@@ -36,14 +37,27 @@ class ExtractionFailure(RuntimeError):
         self.environmental = environmental
 
 
+def request_headers() -> dict[str, str]:
+    """Stable, transparent headers; rate compliance is handled by pacing."""
+    return {"User-Agent": settings.user_agent, "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,application/json;q=0.8", "Accept-Language": "ar,en;q=0.8", "Cache-Control": "no-cache"}
+
+
+def rate_limit_delay(headers: dict, attempt: int) -> float:
+    exponential = settings.rate_limit_backoff_min_seconds * (1.5**attempt)
+    bounded = min(settings.rate_limit_backoff_max_seconds, max(settings.rate_limit_backoff_min_seconds, exponential))
+    retry_after = number_or_none(headers.get("retry-after"))
+    # Honor a server-provided delay, with a safety ceiling for malformed values.
+    return min(60.0, max(bounded, retry_after or 0))
+
+
 async def _scrapling_fetch(url: str) -> FetchedPage:
-    """Fetch with browser impersonation while validating every redirect target."""
+    """Fetch public content with bounded retries and validated redirects."""
     from scrapling.fetchers import AsyncFetcher
 
     for attempt in range(settings.max_retries + 1):
         current = validate_public_host(url)
         for _ in range(4):
-            page = await AsyncFetcher.get(current, follow_redirects=False, timeout=settings.request_timeout, retries=0, headers={"User-Agent": settings.user_agent})
+            page = await AsyncFetcher.get(current, follow_redirects=False, timeout=settings.request_timeout, retries=0, headers=request_headers())
             status = int(page.status)
             headers = {str(k).lower(): str(v) for k, v in dict(page.headers or {}).items()}
             if status in {301, 302, 303, 307, 308}:
@@ -51,8 +65,9 @@ async def _scrapling_fetch(url: str) -> FetchedPage:
                 continue
             if status == 429:
                 if attempt < settings.max_retries:
-                    retry_after = number_or_none(headers.get("retry-after"))
-                    await asyncio.sleep(max(retry_after or 0, 1.5 * (2**attempt)))
+                    delay = rate_limit_delay(headers, attempt)
+                    log.warning("HTTP 429 for %s; retry %s/%s in %.1fs", current, attempt + 1, settings.max_retries, delay)
+                    await asyncio.sleep(delay)
                     break
                 raise ExtractionFailure("RATE_LIMITED", "The storefront rate-limited extraction")
             if status in {401, 403}:
@@ -85,12 +100,18 @@ async def fetch(client: httpx.AsyncClient, url: str) -> FetchedPage:
                     current = safe_redirect(current, response.headers.get("location", ""))
                     continue
                 if response.status_code == 429:
-                    raise ExtractionFailure("RATE_LIMITED", "The storefront rate-limited extraction")
+                    if attempt < settings.max_retries:
+                        delay = rate_limit_delay({str(k).lower(): str(v) for k, v in response.headers.items()}, attempt)
+                        log.warning("HTTP 429 for %s; httpx retry %s/%s in %.1fs", current, attempt + 1, settings.max_retries, delay)
+                        await asyncio.sleep(delay)
+                        break
+                    raise ExtractionFailure("RATE_LIMITED", "The storefront rate-limited extraction after bounded retries")
                 if response.status_code in {401, 403}:
                     raise ExtractionFailure("ACCESS_DENIED", "The public storefront denied access")
                 response.raise_for_status()
                 return FetchedPage(response.text, dict(response.headers), response.status_code, "HTTPX", current)
-            raise ExtractionFailure("ACCESS_DENIED", "Too many redirects")
+            else:
+                raise ExtractionFailure("ACCESS_DENIED", "Too many redirects")
         except ExtractionFailure:
             raise
         except (httpx.TimeoutException, httpx.NetworkError, httpx.HTTPStatusError, ValueError) as exc:
@@ -338,7 +359,7 @@ async def extract_live(url: str, extraction_mode: str = "QUICK", progress_callba
     max_pages = settings.max_pages if is_full else settings.quick_max_pages
     max_depth = settings.max_sitemap_depth if is_full else settings.quick_sitemap_depth
     max_products = None if is_full else settings.quick_products
-    headers = {"User-Agent": settings.user_agent, "Accept": "text/html,application/xhtml+xml,application/xml"}
+    headers = request_headers()
     async with httpx.AsyncClient(timeout=httpx.Timeout(settings.request_timeout), headers=headers) as client:
         home = await fetch(client, url)
         marker = (home.text + " " + str(home.headers)).lower()
@@ -377,7 +398,7 @@ async def extract_live(url: str, extraction_mode: str = "QUICK", progress_callba
                 except Exception as exc:
                     failures[entry["url"]] = {"url": entry["url"], "code": getattr(exc, "code", "PARSING_ERROR"), "message": str(exc)[:240]}
                 finally:
-                    await asyncio.sleep(settings.request_pacing_seconds)
+                    await asyncio.sleep(random.uniform(settings.request_pacing_min_seconds, settings.request_pacing_max_seconds))
 
         selected_entries = product_entries if max_products is None else product_entries[:max_products]
         total = len(selected_entries)
