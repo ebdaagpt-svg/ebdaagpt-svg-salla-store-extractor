@@ -69,8 +69,12 @@ def test_sqlite_session_and_export_persistence():
         assert restarted.get(current.id).stage=="DEMO_MODE"
         assert restarted.get_export(current.id,"csv")==b"PK-test"
         active=Session(id="active",stage="FETCHING",message="working"); restarted.save(active)
+        restarted.save_checkpoint("active",1,{"product":{"id":"1"}})
+        assert restarted.checkpoint_count("active")==1
+        assert restarted.load_checkpoints("active")[0]["product"]["id"]=="1"
         assert restarted.recover_interrupted()==1
         assert restarted.get("active").stage=="ERROR"
+        restarted.clear_checkpoints("active"); assert restarted.checkpoint_count("active")==0
 
 def test_demo_mode_end_to_end(monkeypatch):
     import backend.app.main as main
