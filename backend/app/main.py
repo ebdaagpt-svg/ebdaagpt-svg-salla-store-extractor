@@ -15,7 +15,7 @@ from backend.app.exporters.files import xlsx_bytes, zip_bytes
 from backend.app.services.session_store import SessionStore
 
 logging.basicConfig(level=logging.INFO,format="%(asctime)s %(levelname)s %(name)s %(message)s")
-app=FastAPI(title="Salla Store Extractor",version="1.3.0")
+app=FastAPI(title="Salla Store Extractor",version="1.4.0")
 app.add_middleware(CORSMiddleware,allow_origins=["http://localhost:5173","http://127.0.0.1:5173"],allow_methods=["*"],allow_headers=["*"])
 session_store=SessionStore(settings.session_db_path)
 
@@ -46,15 +46,15 @@ def finalize(s,tables,raw,mode,start):
         issues.append(Issue(Severity="ERROR",Entity_Type="PRODUCT",Entity_ID=None,Field="Source",Issue=failure.get("message","Product extraction failed"),Original_Value=failure.get("url")))
     if raw.get("safety_truncated"):
         from backend.app.models import Issue
-        issues.append(Issue(Severity="WARNING",Entity_Type="CATALOG",Entity_ID=None,Field="Pagination",Issue="Product safety limit reached; increase MAX_PRODUCTS to continue",Original_Value=settings.max_products))
+        issues.append(Issue(Severity="INFO",Entity_Type="CATALOG",Entity_ID=None,Field="Pagination",Issue="Quick Extract intentionally limits the preview; use Full Extract for the complete public catalog",Original_Value=settings.quick_products))
     if raw.get("timed_out"):
         from backend.app.models import Issue
         issues.append(Issue(Severity="WARNING",Entity_Type="CATALOG",Entity_ID=None,Field="Timeout",Issue="Extraction time limit reached; completed records were preserved",Original_Value=raw.get("timeout_seconds")))
     tables["validation_issues"]=[x.model_dump() for x in issues]
     s.tables=tables;s.raw_data=raw;s.issues=issues;s.mode=mode
     errors=sum(x.Severity=="ERROR" for x in issues); warnings=sum(x.Severity=="WARNING" for x in issues)
-    s.stats={"categories":len(tables["categories"]),"products":len(tables["products"]),"variants":len(tables["variants"]),"images":len(tables["images"]),"valid_records":max(0,sum(len(v) for k,v in tables.items() if k!="validation_issues")-errors),"warnings":warnings,"errors":errors,"pages_fetched":raw.get("pages_fetched",1),"duration_seconds":round(time.monotonic()-start,3),"timestamp":datetime.now(timezone.utc).isoformat(),"extractor_version":"1.3.0"}
-    s.progress_current=len(tables["products"]);s.progress_total=len(tables["products"])
+    s.stats={"categories":len(tables["categories"]),"products":len(tables["products"]),"variants":len(tables["variants"]),"images":len(tables["images"]),"valid_records":max(0,sum(len(v) for k,v in tables.items() if k!="validation_issues")-errors),"warnings":warnings,"errors":errors,"pages_fetched":raw.get("pages_fetched",1),"duration_seconds":round(time.monotonic()-start,3),"timestamp":datetime.now(timezone.utc).isoformat(),"extractor_version":"1.4.0","extraction_mode":s.extraction_mode}
+    s.progress_current=raw.get("products_selected",len(tables["products"]));s.progress_total=raw.get("products_selected",len(tables["products"]));s.progress_percentage=100
     if mode=="MOCK":s.stage="DEMO_MODE";s.message="External store access is unavailable in this Preview environment. These records are MOCK DATA and were not extracted from the submitted store."
     elif raw.get("timed_out"):s.stage="COMPLETED";s.message="Time limit reached. Completed products were preserved and are ready for review/export."
     elif errors or raw.get("extraction_failures"):s.stage="PARTIAL_SUCCESS";s.message="Extraction completed with validation errors. Review Validation Issues before export."
@@ -68,9 +68,9 @@ async def health():
         scrapling_available=True
     except ImportError:
         scrapling_available=False
-    return {"backend_status":"ok","extractor_version":"1.3.0","external_network_available":"unknown_until_extraction","browser_available":settings.enable_browser_fallback,"scrapling_available":scrapling_available,"max_products":settings.max_products,"extraction_timeout_seconds":settings.extraction_timeout_seconds,"session_storage":"SQLITE"}
+    return {"backend_status":"ok","extractor_version":"1.4.0","external_network_available":"unknown_until_extraction","browser_available":settings.enable_browser_fallback,"scrapling_available":scrapling_available,"quick_products":settings.quick_products,"quick_timeout_seconds":settings.extraction_timeout_seconds,"full_timeout_seconds":settings.full_extraction_timeout_seconds,"session_storage":"SQLITE"}
 
-async def run_extraction(sid:str,store_url:str):
+async def run_extraction(sid:str,store_url:str,extraction_mode:str):
     s=session_store.get(sid)
     if not s:
         logging.error("Extraction session %s disappeared before processing",sid);return
@@ -78,7 +78,9 @@ async def run_extraction(sid:str,store_url:str):
     try:
         url=normalize_url(store_url);validate_public_host(url);s.stage="DISCOVERING";s.message="Discovering public Salla data";persist_session(s)
         s.stage="FETCHING";s.message="Fetching public storefront";persist_session(s)
-        tables,raw=await extract_live(url);s.stage="STRUCTURING";s.message="Normalizing relational tables";persist_session(s)
+        async def update_progress(current,total):
+            s.progress_current=current;s.progress_total=total;s.progress_percentage=round((current/total)*100,1) if total else 0;s.message=f"Fetching products: {current} / {total}";persist_session(s)
+        tables,raw=await extract_live(url,extraction_mode,update_progress);s.stage="STRUCTURING";s.message="Normalizing relational tables";persist_session(s)
         s.stage="VALIDATING_DATA";s.message="Validating relationships and records";persist_session(s);finalize(s,tables,raw,"LIVE",start)
     except URLSafetyError as exc:
         s.stage="ERROR";s.message=str(exc);persist_session(s)
@@ -97,8 +99,8 @@ async def extract(req:ExtractRequest):
         url=normalize_url(req.store_url);validate_public_host(url)
     except URLSafetyError as exc:
         raise HTTPException(400,{"code":"INVALID_URL","message":str(exc)})
-    sid=str(uuid.uuid4());s=Session(id=sid,stage="VALIDATING_URL",message="Validating public URL");persist_session(s)
-    asyncio.create_task(run_extraction(sid,url))
+    sid=str(uuid.uuid4());s=Session(id=sid,stage="VALIDATING_URL",extraction_mode=req.extraction_mode,message="Validating public URL");persist_session(s)
+    asyncio.create_task(run_extraction(sid,url,req.extraction_mode))
     return {"id":sid,"stage":s.stage,"mode":s.mode,"message":s.message,"stats":s.stats}
 
 def get_session(sid):
