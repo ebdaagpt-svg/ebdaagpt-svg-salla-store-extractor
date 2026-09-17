@@ -36,6 +36,8 @@ Excel contains README plus Store, Categories, Products, Product Categories, Imag
 
 Copy `.env.example` to `.env` to override safe defaults. No secrets are required. Browser automation is disabled and is not needed to start the application.
 
+Fast-preview defaults limit each run to 25 product pages and 60 seconds. Sitemap discovery receives at most 15 seconds of that same budget. If the deadline is reached, completed records remain exportable and the session enters the terminal `COMPLETED` state.
+
 ## Tests
 
 ```bash
@@ -51,7 +53,7 @@ npm run build
 
 ## Scrapling integration
 
-The API uses Scrapling's static HTTP fetcher first (browser fingerprinting, bounded retries), then falls back to `httpx`. Redirects are handled manually and every redirect target passes the existing SSRF checks. Browser rendering remains disabled by default.
+The API uses Scrapling's static HTTP fetcher first with bounded retries, then falls back to `httpx`. It reads public JSON-LD and serialized page state, but does not bypass authentication, CAPTCHAs, Cloudflare challenges, or access controls. Redirects are handled manually and every redirect target passes the existing SSRF checks. Browser rendering remains disabled by default.
 
 To deploy the official Scrapling MCP server, create a second Railway service from this repository, select `Dockerfile.mcp` (or use `railway-mcp.json`), and set a long random `SCRAPLING_MCP_AUTH_TOKEN`. Give that service its own public domain. The Streamable HTTP endpoint is:
 
