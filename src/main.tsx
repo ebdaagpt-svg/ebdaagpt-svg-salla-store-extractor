@@ -31,6 +31,7 @@ const tabs = [
   ["website_data", "Website Data"],
   ["categories", "Categories"],
   ["products", "Products"],
+  ["products_flat", "Products Flat · one row"],
   ["product_categories", "Product Categories"],
   ["images", "Images"],
   ["product_options", "Options"],
@@ -136,9 +137,7 @@ function App() {
   const [stage, setStage] = useState("IDLE");
   const [error, setError] = useState("");
   const [dataType, setDataType] = useState<"PRODUCTS" | "WEBSITE">("PRODUCTS");
-  const [extractionMode, setExtractionMode] = useState<"QUICK" | "FULL">(
-    "QUICK",
-  );
+  const [productLimit, setProductLimit] = useState("30");
   async function run() {
     setBusy(true);
     setError("");
@@ -152,7 +151,11 @@ function App() {
         body: JSON.stringify({
           store_url: url,
           data_type: dataType,
-          extraction_mode: extractionMode,
+          extraction_mode: productLimit === "ALL" ? "FULL" : "QUICK",
+          max_products:
+            dataType === "WEBSITE" || productLimit === "ALL"
+              ? null
+              : Number(productLimit),
         }),
       });
       const body = await r.json();
@@ -214,7 +217,7 @@ function App() {
           <Database size={22} />
           <div>
             <strong>Salla Data Extractor</strong>
-            <small>Migration preparation · v1.7.0</small>
+            <small>Migration preparation · v1.8.0</small>
           </div>
         </div>
         <div className="health">
@@ -255,18 +258,17 @@ function App() {
             </select>
           </label>
           <label className="mode-field">
-            Extraction mode
+            Product limit
             <select
-              value={extractionMode}
-              onChange={(e) =>
-                setExtractionMode(e.target.value as "QUICK" | "FULL")
-              }
+              value={productLimit}
+              onChange={(e) => setProductLimit(e.target.value)}
               disabled={busy || dataType === "WEBSITE"}
             >
-              <option value="QUICK">Quick Extract · first 30 products</option>
-              <option value="FULL">
-                Full Extract · complete public catalog
-              </option>
+              <option value="30">30 products</option>
+              <option value="50">50 products</option>
+              <option value="100">100 products</option>
+              <option value="250">250 products</option>
+              <option value="ALL">All public products</option>
             </select>
           </label>
           <button className="primary" onClick={run} disabled={busy || !url}>

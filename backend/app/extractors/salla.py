@@ -158,14 +158,24 @@ def embedded_json_objects(soup: BeautifulSoup) -> list[dict]:
     # Salla exposes product/category analytics as a public JSON object.
     for node in soup.find_all("script"):
         script = node.string or node.get_text()
-        if "dataLayer.push(" not in script:
-            continue
-        for match in re.finditer(r"dataLayer\.push\((\{.*?\})\);", script, re.DOTALL):
+        if "dataLayer.push(" in script:
+            for match in re.finditer(r"dataLayer\.push\((\{.*?\})\);", script, re.DOTALL):
+                try:
+                    value = json.loads(match.group(1))
+                    if isinstance(value, dict): out.append(value)
+                except json.JSONDecodeError:
+                    continue
+        # Current Salla themes expose public store configuration through this
+        # event payload (contacts, social accounts, country and public IDs).
+        marker = "salla.event.dispatchEvents("
+        start = script.find(marker)
+        if start >= 0:
             try:
-                value = json.loads(match.group(1))
-                if isinstance(value, dict): out.append(value)
+                value, _ = json.JSONDecoder().raw_decode(script[start + len(marker):].lstrip())
+                if isinstance(value, dict):
+                    out.append(value)
             except json.JSONDecodeError:
-                continue
+                pass
     return [x for x in out if isinstance(x, dict)]
 
 
@@ -191,14 +201,17 @@ def website_data_from_page(raw: list[dict], soup: BeautifulSoup, url: str, strat
     entity_types = {"organization", "localbusiness", "store", "onlinestore", "website"}
     entities = [obj for obj in walk_json(raw) if str(obj.get("@type", "")).lower() in entity_types]
     primary = next((obj for obj in entities if str(obj.get("@type", "")).lower() != "website"), entities[0] if entities else {})
+    salla_context = next((obj for obj in walk_json(raw) if isinstance(obj.get("store"), dict) and (obj["store"].get("contacts") or obj["store"].get("social"))), {})
+    salla_store = salla_context.get("store", {})
     canonical_node = soup.select_one('link[rel="canonical"][href]')
     canonical = urljoin(url, canonical_node.get("href")) if canonical_node else url
     title = _meta_content(soup, 'meta[property="og:site_name"]', 'meta[property="og:title"]')
-    name = text_or_none(primary.get("name") or primary.get("legalName") or title or (soup.title.string if soup.title else None))
-    description = text_or_none(primary.get("description") or _meta_content(soup, 'meta[name="description"]', 'meta[property="og:description"]'))
-    logo_values = image_urls(primary.get("logo")) or image_urls(_meta_content(soup, 'meta[property="og:image"]'))
-    telephone = text_or_none(primary.get("telephone"))
-    email = text_or_none(primary.get("email"))
+    name = text_or_none(salla_store.get("name") or primary.get("name") or primary.get("legalName") or title or (soup.title.string if soup.title else None))
+    description = text_or_none(salla_store.get("description") or primary.get("description") or _meta_content(soup, 'meta[name="description"]', 'meta[property="og:description"]'))
+    logo_values = image_urls(salla_store.get("logo") or salla_store.get("icon")) or image_urls(primary.get("logo")) or image_urls(_meta_content(soup, 'meta[property="og:image"]'))
+    contacts = salla_store.get("contacts") if isinstance(salla_store.get("contacts"), dict) else {}
+    telephone = text_or_none(contacts.get("mobile") or contacts.get("phone") or contacts.get("whatsapp") or primary.get("telephone"))
+    email = text_or_none(contacts.get("email") or primary.get("email"))
     address = primary.get("address") if isinstance(primary.get("address"), dict) else {}
     geo = primary.get("geo") if isinstance(primary.get("geo"), dict) else {}
     contact_points = primary.get("contactPoint") or []
@@ -227,12 +240,21 @@ def website_data_from_page(raw: list[dict], soup: BeautifulSoup, url: str, strat
             rows.append({"Field": field, "Value": value, "Source_URL": canonical, "Source_Strategy": source})
 
     add("Store_Name", name)
+    add("Store_Source_ID", salla_store.get("id"))
+    add("Store_Username", salla_store.get("username"))
     add("Legal_Name", primary.get("legalName"))
     add("Description", description)
     for logo in logo_values:
         add("Logo_URL", urljoin(url, logo))
     add("Phone", telephone)
     add("Email", email)
+    for key in ("mobile", "phone", "telephone"):
+        add("Phone", contacts.get(key), "SALLA_PUBLIC_STATE")
+    for node in soup.select('a[href^="tel:"]'):
+        add("Phone", node.get("href", "")[4:].split("?", 1)[0], "FOOTER_OR_LINK")
+    for node in soup.select('a[href^="mailto:"]'):
+        add("Email", node.get("href", "")[7:].split("?", 1)[0], "FOOTER_OR_LINK")
+    add("WhatsApp_Number", contacts.get("whatsapp"))
     add("Address_Street", address.get("streetAddress"))
     add("Location_City", address.get("addressLocality"))
     add("Location_Region", address.get("addressRegion"))
@@ -242,12 +264,27 @@ def website_data_from_page(raw: list[dict], soup: BeautifulSoup, url: str, strat
     add("Latitude", geo.get("latitude"))
     add("Longitude", geo.get("longitude"))
     add("Opening_Hours", primary.get("openingHours") or primary.get("openingHoursSpecification"))
-    add("VAT_ID", primary.get("vatID") or primary.get("taxID"))
+    settings_value = salla_store.get("settings") if isinstance(salla_store.get("settings"), dict) else {}
+    tax_value = settings_value.get("tax") if isinstance(settings_value.get("tax"), dict) else {}
+    certificate = settings_value.get("certificate") if isinstance(settings_value.get("certificate"), dict) else {}
+    add("VAT_ID", tax_value.get("number") or primary.get("vatID") or primary.get("taxID"))
+    add("Commercial_Registration", settings_value.get("commercial_number"))
+    add("Business_Certificate_ID", certificate.get("id"))
+    add("Country", salla_store.get("store_country") or salla_store.get("country"))
+    currencies = salla_context.get("currencies") if isinstance(salla_context.get("currencies"), dict) else {}
+    currency = next(iter(currencies.keys()), None)
+    add("Currency", currency)
+    add("Supports_Store_Pickup", salla_store.get("support_pickup"))
+    shipping = salla_context.get("shipping") if isinstance(salla_context.get("shipping"), dict) else {}
+    delivery_location = shipping.get("delivery_location")
+    add("Delivery_Location", delivery_location, "SALLA_PUBLIC_STATE")
     add("Public_URL", primary.get("url") or canonical)
     add("Language", soup.html.get("lang") if soup.html else None, "HTML")
 
     social_urls = primary.get("sameAs") or []
     social_urls = [social_urls] if isinstance(social_urls, str) else social_urls
+    if isinstance(salla_store.get("social"), dict):
+        social_urls.extend(salla_store["social"].values())
     social_urls = [*social_urls, *(node.get("href") for node in soup.select("a[href]") if node.get("href"))]
     for social_url in social_urls:
         absolute = urljoin(url, str(social_url))
@@ -256,7 +293,15 @@ def website_data_from_page(raw: list[dict], soup: BeautifulSoup, url: str, strat
         if field:
             add(field, absolute, "JSON_LD_OR_LINK")
 
-    store = [{"Store_ID": stable_id("store", canonical), "Store_Name": name or "Salla Store", "Store_URL": canonical, "Currency": None, "Language": soup.html.get("lang") if soup.html else None, "Extraction_Date": datetime.now(timezone.utc).isoformat(), "Data_Mode": "LIVE", "Extractor_Version": "1.7.0"}]
+    for node in soup.select('footer address, footer [class*="address" i], footer [class*="location" i], [itemprop="address"]'):
+        add("Location_Text", node.get_text(" ", strip=True), "FOOTER_HTML")
+    for node in soup.select('a[href*="maps.google"], a[href*="google.com/maps"], a[href*="goo.gl/maps"], a[href*="maps.apple"]'):
+        add("Location_Map_URL", urljoin(url, node.get("href")), "FOOTER_OR_LINK")
+    if isinstance(salla_store.get("apps"), dict):
+        add("Mobile_App_Apple", salla_store["apps"].get("appstore"), "SALLA_PUBLIC_STATE")
+        add("Mobile_App_Android", salla_store["apps"].get("googleplay"), "SALLA_PUBLIC_STATE")
+
+    store = [{"Store_ID": str(salla_store.get("id") or stable_id("store", canonical)), "Store_Name": name or "Salla Store", "Store_URL": canonical, "Currency": currency, "Language": soup.html.get("lang") if soup.html else None, "Extraction_Date": datetime.now(timezone.utc).isoformat(), "Data_Mode": "LIVE", "Extractor_Version": "1.8.0"}]
     return store, rows
 
 
@@ -509,13 +554,13 @@ async def discover_sitemaps(client, base_url: str, max_pages: int, max_depth: in
     return list({x["url"]: x for x in entries}.values()), len(seen), sorted(strategies)
 
 
-async def extract_live(url: str, extraction_mode: str = "QUICK", progress_callback=None, checkpoint_callback=None, checkpoint_loader=None):
-    is_full = extraction_mode == "FULL"
+async def extract_live(url: str, extraction_mode: str = "QUICK", progress_callback=None, checkpoint_callback=None, checkpoint_loader=None, max_products_override: int | None = None):
+    max_products = max_products_override if max_products_override is not None else (None if extraction_mode == "FULL" else settings.quick_products)
+    is_full = max_products is None or max_products > settings.quick_products
     timeout_seconds = settings.full_extraction_timeout_seconds if is_full else settings.extraction_timeout_seconds
     deadline = time.monotonic() + timeout_seconds
     max_pages = settings.max_pages if is_full else settings.quick_max_pages
     max_depth = settings.max_sitemap_depth if is_full else settings.quick_sitemap_depth
-    max_products = None if is_full else settings.quick_products
     headers = request_headers()
     async with httpx.AsyncClient(timeout=httpx.Timeout(settings.request_timeout), headers=headers) as client:
         home = await fetch(client, url)
@@ -627,7 +672,7 @@ async def extract_live(url: str, extraction_mode: str = "QUICK", progress_callba
         if not products:
             raise ExtractionFailure("UNSUPPORTED_STRUCTURE", "Salla storefront detected, but no public product records could be structured")
         name = text_or_none(home_soup.title.string if home_soup.title else None) or "Salla Store"
-        store = [{"Store_ID": stable_id("store", url), "Store_Name": name, "Store_URL": url, "Currency": next((p["Currency"] for p in products if p["Currency"]), None), "Language": home_soup.html.get("lang") if home_soup.html else None, "Extraction_Date": datetime.now(timezone.utc).isoformat(), "Data_Mode": "LIVE", "Extractor_Version": "1.6.0"}]
+        store = [{"Store_ID": stable_id("store", url), "Store_Name": name, "Store_URL": url, "Currency": next((p["Currency"] for p in products if p["Currency"]), None), "Language": home_soup.html.get("lang") if home_soup.html else None, "Extraction_Date": datetime.now(timezone.utc).isoformat(), "Data_Mode": "LIVE", "Extractor_Version": "1.8.0"}]
         tables = {"store": store, "categories": categories, "products": products, "product_categories": product_categories, "images": images, "product_options": [], "option_values": [], "variants": variants, "variant_option_values": [], "tags": [], "product_tags": [], "seo": seo}
-        raw = {"source_url": url, "target_scope": scope, "exact_url_preserved": True, "extraction_mode": extraction_mode, "strategies": sorted(strategies), "pages_fetched": 1 + sitemap_pages + len(results) + len(failures), "sitemap_pages": sitemap_pages, "sitemap_entries": len(sitemap_entries), "products_discovered": len(product_entries), "products_selected": len(selected_entries), "products_extracted": len(products), "extraction_failures": list(failures.values()), "safety_truncated": max_products is not None and len(product_entries) > max_products, "timed_out": timed_out, "timeout_seconds": timeout_seconds}
+        raw = {"source_url": url, "target_scope": scope, "exact_url_preserved": True, "extraction_mode": extraction_mode, "max_products": max_products, "strategies": sorted(strategies), "pages_fetched": 1 + sitemap_pages + len(results) + len(failures), "sitemap_pages": sitemap_pages, "sitemap_entries": len(sitemap_entries), "products_discovered": len(product_entries), "products_selected": len(selected_entries), "products_extracted": len(products), "extraction_failures": list(failures.values()), "safety_truncated": max_products is not None and len(product_entries) > max_products, "timed_out": timed_out, "timeout_seconds": timeout_seconds}
         return tables, raw

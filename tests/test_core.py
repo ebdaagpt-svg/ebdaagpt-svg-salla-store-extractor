@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from backend.app.main import app
 from backend.app.extractors.salla import ExtractionFailure, embedded_json_objects, extract_size_volume, extraction_scope, parse_sitemap, product_entries_from_dom, rate_limit_delay, source_id_from_url, product_from_page, json_objects, website_data_from_page
 from backend.app.services.session_store import SessionStore
+from backend.app.transformers.products_flat import build_products_flat
 from bs4 import BeautifulSoup
 
 def session():
@@ -70,12 +71,29 @@ def test_website_data_normalization():
     assert values["Location_City"]=="الرياض" and values["Latitude"]=="24.7"
     assert values["Social_Instagram"]=="https://instagram.com/shop"
     assert values["Social_X_Twitter"]=="https://x.com/shop"
+def test_salla_public_state_website_fields():
+    html='''<html lang="ar"><head><script>salla.event.dispatchEvents({"twilight::init":{"store":{"id":77,"name":"متجر","username":"shop.user","country":"SA","contacts":{"mobile":"+966500000001","email":"info@shop.test","whatsapp":"+966500000002"},"social":{"instagram":"https://instagram.com/shop"},"settings":{"tax":{"number":"VAT123"},"commercial_number":"CR456"},"apps":{"appstore":"https://apps.apple.com/app/id1"}},"currencies":{"SAR":{"code":"SAR"}}}});</script></head></html>'''
+    soup=BeautifulSoup(html,"lxml")
+    raw=embedded_json_objects(soup)
+    store,rows=website_data_from_page(raw,soup,"https://shop.test/")
+    pairs={(row["Field"],row["Value"]) for row in rows}
+    assert store[0]["Store_ID"]=="77" and store[0]["Currency"]=="SAR"
+    assert ("Phone","+966500000001") in pairs
+    assert ("Email","info@shop.test") in pairs
+    assert ("VAT_ID","VAT123") in pairs and ("Commercial_Registration","CR456") in pairs
+    assert ("Social_Instagram","https://instagram.com/shop") in pairs
+def test_products_flat_one_row_per_product():
+    tables=mock_catalog()
+    rows=build_products_flat(tables)
+    assert len(rows)==len(tables["products"])==20
+    assert rows[0]["Category_Names"] and rows[0]["Main_Image_URL"]
+    assert rows[0]["Image_Count"]==2
 def test_relationships_and_demo_warnings():
     issues=validate_catalog(mock_catalog()); assert any(x.Field=="SKU" for x in issues) and any(x.Field=="Images" for x in issues)
 def test_excel_generation():
-    wb=load_workbook(io.BytesIO(xlsx_bytes(session()))); assert {"README","Website_Data","Products","Validation_Issues"}.issubset(wb.sheetnames); assert wb["Store"]["G2"].value=="MOCK"
+    wb=load_workbook(io.BytesIO(xlsx_bytes(session()))); assert {"README","Website_Data","Products","Products_Flat","Validation_Issues"}.issubset(wb.sheetnames); assert wb["Store"]["G2"].value=="MOCK"
 def test_csv_generation():
-    z=zipfile.ZipFile(io.BytesIO(zip_bytes(session()))); assert "products.csv" in z.namelist(); assert "MOCK DATA" in z.read("README.txt").decode("utf-8-sig")
+    z=zipfile.ZipFile(io.BytesIO(zip_bytes(session()))); assert "products.csv" in z.namelist() and "products_flat.csv" in z.namelist(); assert "MOCK DATA" in z.read("README.txt").decode("utf-8-sig")
 
 def test_sqlite_session_and_export_persistence():
     with TemporaryDirectory() as directory:
@@ -129,3 +147,18 @@ def test_website_demo_mode_end_to_end(monkeypatch):
     payload=client.get(f"/api/extraction/{sid}/tables").json()
     assert payload["tables"]["products"]==[]
     assert len(payload["tables"]["website_data"])>=5
+
+def test_product_limit_validation_and_persistence(monkeypatch):
+    import backend.app.main as main
+    async def network_blocked(url,*args,**kwargs): raise ExtractionFailure("PREVIEW_NETWORK_RESTRICTED","blocked",True)
+    monkeypatch.setattr(main,"validate_public_host",lambda url:url)
+    monkeypatch.setattr(main,"extract_live",network_blocked)
+    client=TestClient(app)
+    assert client.post("/api/extract",json={"store_url":"https://example.salla.sa/","max_products":1001}).status_code==422
+    result=client.post("/api/extract",json={"store_url":"https://example.salla.sa/","data_type":"PRODUCTS","max_products":50})
+    sid=result.json()["id"]
+    for _ in range(50):
+        status=client.get(f"/api/extraction/{sid}").json()
+        if status["stage"] in {"READY","DEMO_MODE","ERROR"}: break
+        time.sleep(.01)
+    assert status["max_products"]==50 and status["stats"]["product_limit"]==50
