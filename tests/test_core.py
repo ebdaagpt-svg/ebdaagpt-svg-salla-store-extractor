@@ -1,4 +1,5 @@
 import io, time, zipfile
+from tempfile import TemporaryDirectory
 import pytest
 from openpyxl import load_workbook
 from backend.app.utils import normalize_url, validate_public_host, number_or_none, bool_or_none, html_to_text, URLSafetyError
@@ -9,12 +10,16 @@ from backend.app.exporters.files import xlsx_bytes, zip_bytes
 from fastapi.testclient import TestClient
 from backend.app.main import app
 from backend.app.extractors.salla import ExtractionFailure, parse_sitemap, source_id_from_url, product_from_page, json_objects
+from backend.app.services.session_store import SessionStore
 from bs4 import BeautifulSoup
 
 def session():
     tables=mock_catalog();issues=validate_catalog(tables);tables["validation_issues"]=[x.model_dump() for x in issues]
     return Session(id="test",stage="DEMO_MODE",mode="MOCK",message="test",tables=tables,issues=issues)
 def test_url_validation(): assert normalize_url("https://shop.example.com")=="https://shop.example.com/"
+def test_complex_salla_filter_url():
+    value=normalize_url("https://shop.example.com/products?filters[category_id]=12&filters[available]=1")
+    assert "filters%5Bcategory_id%5D=12" in value and "filters%5Bavailable%5D=1" in value
 @pytest.mark.parametrize("url",["file:///etc/passwd","ftp://example.com","http://localhost:8000"])
 def test_bad_urls(url):
     with pytest.raises(URLSafetyError): normalize_url(url)
@@ -42,6 +47,14 @@ def test_excel_generation():
     wb=load_workbook(io.BytesIO(xlsx_bytes(session()))); assert {"README","Products","Validation_Issues"}.issubset(wb.sheetnames); assert wb["Store"]["G2"].value=="MOCK"
 def test_csv_generation():
     z=zipfile.ZipFile(io.BytesIO(zip_bytes(session()))); assert "products.csv" in z.namelist(); assert "MOCK DATA" in z.read("README.txt").decode("utf-8-sig")
+
+def test_sqlite_session_and_export_persistence():
+    with TemporaryDirectory() as directory:
+        path=f"{directory}/sessions.sqlite3"
+        first=SessionStore(path); current=session(); first.save(current); first.save_export(current.id,"csv",b"PK-test")
+        restarted=SessionStore(path)
+        assert restarted.get(current.id).stage=="DEMO_MODE"
+        assert restarted.get_export(current.id,"csv")==b"PK-test"
 
 def test_demo_mode_end_to_end(monkeypatch):
     import backend.app.main as main
