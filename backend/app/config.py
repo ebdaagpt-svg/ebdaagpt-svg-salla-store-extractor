@@ -5,7 +5,9 @@ class Settings(BaseSettings):
     max_retries: int = 3
     max_concurrent_requests: int = 2
     max_pages: int = 40
-    max_products: int = 1000
+    max_products: int = 25
+    extraction_timeout_seconds: float = 60
+    sitemap_timeout_seconds: float = 15
     request_pacing_seconds: float = 0.35
     user_agent: str = "SallaMigrationExtractor/1.0"
     enable_browser_fallback: bool = False
