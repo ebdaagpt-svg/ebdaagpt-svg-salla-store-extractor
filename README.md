@@ -1,6 +1,6 @@
 # Salla Store Data Extractor
 
-A runnable React + TypeScript and FastAPI application that attempts conservative extraction of publicly accessible Salla storefront catalog data, normalizes records into relational migration tables, validates integrity, and exports Excel or zipped CSV files.
+A runnable React + TypeScript and FastAPI application that attempts conservative extraction of publicly accessible Salla storefront data. The user can choose `Products only` or `Website data` (public identity, contact, location, logo, and social links), then inspect and export normalized Excel or zipped CSV files.
 
 ## Architecture
 
@@ -30,13 +30,15 @@ The backend validates and resolves the supplied HTTP(S) URL, blocks non-public a
 
 ## Export structure
 
-Excel contains README plus Store, Categories, Products, Product Categories, Images, Options, Option Values, Variants, Variant Option Values, Tags, Product Tags, SEO, and Validation Issues sheets. CSV export is a ZIP with one UTF-8-BOM CSV per table and `README.txt`. Mock exports carry explicit MOCK metadata and warnings.
+Excel contains README plus Store, Website Data, Categories, Products, Product Categories, Images, Options, Option Values, Variants, Variant Option Values, Tags, Product Tags, SEO, and Validation Issues sheets. CSV export is a ZIP with one UTF-8-BOM CSV per table and `README.txt`. Mock exports carry explicit MOCK metadata and warnings.
 
 ## Configuration
 
 Copy `.env.example` to `.env` to override safe defaults. No secrets are required. Browser automation is disabled and is not needed to start the application.
 
 Quick Extract is the default and processes the first 30 public product pages within 45 seconds. Full Extract has no product-count cap, walks up to 100 sitemap documents/five nested levels, processes URLs in batches of 40, and runs as a persisted background session with live percentage progress. Each completed batch is checkpointed to SQLite and released from working memory. A 30-minute safety deadline prevents abandoned full jobs from running indefinitely; completed records remain exportable in terminal `COMPLETED` state. Unexpected failures after a checkpoint end as `COMPLETED_WITH_ERRORS` instead of breaking status polling.
+
+The independent `Website data` type fetches one submitted public page and extracts only public store metadata from JSON-LD and HTML: store/legal name, description, logo, phone, email, postal address, city/region/country, coordinates, opening hours, tax/VAT identifier when exposed, language, and recognized social-media links. Missing values remain absent and are never invented. Quick/Full applies only to `Products only`.
 
 Extraction sessions and pre-generated XLSX/CSV ZIP artifacts are stored in SQLite (`SESSION_DB_PATH`). Use a persistent Railway volume mounted at `/data` with `SESSION_DB_PATH=/data/extractions.sqlite3` to preserve sessions across deployments as well as process restarts.
 
@@ -58,6 +60,8 @@ npm run build
 The API uses Scrapling's static HTTP fetcher first with bounded retries, then falls back to `httpx`. It reads public JSON-LD and serialized page state, but does not bypass authentication, CAPTCHAs, Cloudflare challenges, or access controls. Redirects are handled manually and every redirect target passes the existing SSRF checks. Browser rendering remains disabled by default.
 
 HTTP 429 responses are retried up to three times with bounded exponential backoff (3, 4.5, then 5 seconds) while honoring a larger numeric `Retry-After` value. Requests use randomized 0.3–0.8 second pacing and a stable, transparent extractor User-Agent; identity/header rotation is intentionally not used.
+
+Submitted product and category URLs are scope-isolated. A product URL extracts only that product. A category/filter URL is fetched exactly (path and query included) and only product cards/pagination found within that listing are followed. Category jobs never fall back to the store-wide sitemap; client-rendered listings that expose no public product cards return `UNSUPPORTED_STRUCTURE` instead of unrelated catalog rows.
 
 To deploy the official Scrapling MCP server, create a second Railway service from this repository, select `Dockerfile.mcp` (or use `railway-mcp.json`), and set a long random `SCRAPLING_MCP_AUTH_TOKEN`. Give that service its own public domain. The Streamable HTTP endpoint is:
 

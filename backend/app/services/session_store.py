@@ -51,6 +51,10 @@ class SessionStore:
             row = db.execute("SELECT payload FROM extraction_exports WHERE session_id=? AND kind=?", (session_id, kind)).fetchone()
         return bytes(row[0]) if row else None
 
+    def clear_exports(self, session_id: str):
+        with self._lock, self._connect() as db:
+            db.execute("DELETE FROM extraction_exports WHERE session_id=?", (session_id,))
+
     def save_checkpoint(self, session_id: str, batch_number: int, payload: dict):
         with self._lock, self._connect() as db:
             db.execute(

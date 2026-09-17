@@ -9,7 +9,7 @@ from backend.app.validators.catalog import validate_catalog
 from backend.app.exporters.files import xlsx_bytes, zip_bytes
 from fastapi.testclient import TestClient
 from backend.app.main import app
-from backend.app.extractors.salla import ExtractionFailure, embedded_json_objects, extract_size_volume, parse_sitemap, rate_limit_delay, source_id_from_url, product_from_page, json_objects
+from backend.app.extractors.salla import ExtractionFailure, embedded_json_objects, extract_size_volume, extraction_scope, parse_sitemap, product_entries_from_dom, rate_limit_delay, source_id_from_url, product_from_page, json_objects, website_data_from_page
 from backend.app.services.session_store import SessionStore
 from bs4 import BeautifulSoup
 
@@ -35,6 +35,13 @@ def test_sitemap_parsing_and_product_ids():
     xml='''<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:image="http://www.google.com/schemas/sitemap-image/1.1"><url><loc>https://shop.example/item/p123</loc><lastmod>2026-01-01</lastmod><image:image><image:loc>https://cdn.example/a.jpg</image:loc></image:image></url></urlset>'''
     nested,rows=parse_sitemap(xml); assert not nested and rows[0]["images"]==["https://cdn.example/a.jpg"]
     assert source_id_from_url(rows[0]["url"])=="123"
+def test_exact_url_scope_and_category_dom_isolation():
+    assert extraction_scope("https://shop.example/")=="STORE"
+    assert extraction_scope("https://shop.example/item/p123")=="PRODUCT"
+    assert extraction_scope("https://shop.example/ar/cables/c44")=="CATEGORY"
+    assert extraction_scope("https://shop.example/products?filters[category_id]=44")=="CATEGORY"
+    soup=BeautifulSoup('<a href="/unrelated/p999">outside</a><salla-product-card><a href="/inside/p123">inside</a></salla-product-card>',"lxml")
+    assert [row["url"] for row in product_entries_from_dom(soup,"https://shop.example/category/c44")]==["https://shop.example/inside/p123"]
 def test_jsonld_product_prices_and_public_fields():
     html='''<html><head><script type="application/ld+json">{"@type":"Product","productID":"123","name":"عبوة اختبار","description":"<p>وصف</p>","weight":{"value":500,"unitText":"ml"},"notes":"يحفظ مبرداً","offers":{"price":80,"highPrice":100,"priceCurrency":"SAR","availability":"https://schema.org/InStock","shippingDetails":{"shippingLabel":"جاهز للشحن"}}}</script></head></html>'''
     soup=BeautifulSoup(html,"lxml")
@@ -54,10 +61,19 @@ def test_public_salla_datalayer_categories():
     soup=BeautifulSoup(html,"lxml")
     parsed=product_from_page(embedded_json_objects(soup),soup,"https://shop.example/item/p123")
     assert parsed and parsed[-1]==[("العناية","https://shop.example/c44")]
+def test_website_data_normalization():
+    html='''<html lang="ar"><head><link rel="canonical" href="https://shop.example/"><script type="application/ld+json">{"@type":"Organization","name":"متجر الاختبار","description":"وصف عام","logo":"/logo.png","telephone":"+966500000000","email":"hello@shop.example","address":{"streetAddress":"الشارع الأول","addressLocality":"الرياض","addressCountry":"SA"},"geo":{"latitude":24.7,"longitude":46.7},"sameAs":["https://instagram.com/shop"]}</script></head><body><a href="https://x.com/shop">X</a></body></html>'''
+    soup=BeautifulSoup(html,"lxml")
+    store,rows=website_data_from_page(embedded_json_objects(soup),soup,"https://shop.example/")
+    values={row["Field"]:row["Value"] for row in rows}
+    assert store[0]["Store_Name"]=="متجر الاختبار"
+    assert values["Location_City"]=="الرياض" and values["Latitude"]=="24.7"
+    assert values["Social_Instagram"]=="https://instagram.com/shop"
+    assert values["Social_X_Twitter"]=="https://x.com/shop"
 def test_relationships_and_demo_warnings():
     issues=validate_catalog(mock_catalog()); assert any(x.Field=="SKU" for x in issues) and any(x.Field=="Images" for x in issues)
 def test_excel_generation():
-    wb=load_workbook(io.BytesIO(xlsx_bytes(session()))); assert {"README","Products","Validation_Issues"}.issubset(wb.sheetnames); assert wb["Store"]["G2"].value=="MOCK"
+    wb=load_workbook(io.BytesIO(xlsx_bytes(session()))); assert {"README","Website_Data","Products","Validation_Issues"}.issubset(wb.sheetnames); assert wb["Store"]["G2"].value=="MOCK"
 def test_csv_generation():
     z=zipfile.ZipFile(io.BytesIO(zip_bytes(session()))); assert "products.csv" in z.namelist(); assert "MOCK DATA" in z.read("README.txt").decode("utf-8-sig")
 
@@ -95,3 +111,21 @@ def test_demo_mode_end_to_end(monkeypatch):
     assert len(tables["products"])==20 and tables["store"][0]["Data_Mode"]=="MOCK"
     assert client.get(f"/api/extraction/{sid}/export/xlsx").content[:2]==b"PK"
     assert client.get(f"/api/extraction/{sid}/export/csv").content[:2]==b"PK"
+
+def test_website_demo_mode_end_to_end(monkeypatch):
+    import backend.app.main as main
+    async def network_blocked(url,*args,**kwargs): raise ExtractionFailure("PREVIEW_NETWORK_RESTRICTED","blocked",True)
+    monkeypatch.setattr(main,"validate_public_host",lambda url:url)
+    monkeypatch.setattr(main,"extract_website_data",network_blocked)
+    client=TestClient(app)
+    result=client.post("/api/extract",json={"store_url":"https://example.salla.sa/","data_type":"WEBSITE"})
+    assert result.status_code==202
+    sid=result.json()["id"]
+    for _ in range(50):
+        status=client.get(f"/api/extraction/{sid}").json()
+        if status["stage"] in {"READY","DEMO_MODE","ERROR"}: break
+        time.sleep(.01)
+    assert status["mode"]=="MOCK" and status["data_type"]=="WEBSITE"
+    payload=client.get(f"/api/extraction/{sid}/tables").json()
+    assert payload["tables"]["products"]==[]
+    assert len(payload["tables"]["website_data"])>=5

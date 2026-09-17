@@ -28,6 +28,7 @@ type Payload = {
 };
 const tabs = [
   ["overview", "Overview"],
+  ["website_data", "Website Data"],
   ["categories", "Categories"],
   ["products", "Products"],
   ["product_categories", "Product Categories"],
@@ -134,6 +135,7 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [stage, setStage] = useState("IDLE");
   const [error, setError] = useState("");
+  const [dataType, setDataType] = useState<"PRODUCTS" | "WEBSITE">("PRODUCTS");
   const [extractionMode, setExtractionMode] = useState<"QUICK" | "FULL">(
     "QUICK",
   );
@@ -149,6 +151,7 @@ function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           store_url: url,
+          data_type: dataType,
           extraction_mode: extractionMode,
         }),
       });
@@ -211,7 +214,7 @@ function App() {
           <Database size={22} />
           <div>
             <strong>Salla Data Extractor</strong>
-            <small>Migration preparation · v1.5.0</small>
+            <small>Migration preparation · v1.7.0</small>
           </div>
         </div>
         <div className="health">
@@ -220,10 +223,10 @@ function App() {
       </header>
       <section className="control">
         <div className="intro">
-          <h1>Public catalog extraction</h1>
+          <h1>Public store data extraction</h1>
           <p>
-            Extract, normalize, validate, and export publicly accessible Salla
-            storefront data.
+            Extract either public website identity/contact data or public
+            product catalog records.
           </p>
         </div>
         <div className="form">
@@ -237,13 +240,28 @@ function App() {
             />
           </label>
           <label className="mode-field">
+            Data type
+            <select
+              value={dataType}
+              onChange={(e) =>
+                setDataType(e.target.value as "PRODUCTS" | "WEBSITE")
+              }
+              disabled={busy}
+            >
+              <option value="PRODUCTS">Products only</option>
+              <option value="WEBSITE">
+                Website data · name, location, social media
+              </option>
+            </select>
+          </label>
+          <label className="mode-field">
             Extraction mode
             <select
               value={extractionMode}
               onChange={(e) =>
                 setExtractionMode(e.target.value as "QUICK" | "FULL")
               }
-              disabled={busy}
+              disabled={busy || dataType === "WEBSITE"}
             >
               <option value="QUICK">Quick Extract · first 30 products</option>
               <option value="FULL">
@@ -311,6 +329,7 @@ function App() {
               </b>
             </div>
             {[
+              "website_fields",
               "products",
               "categories",
               "variants",

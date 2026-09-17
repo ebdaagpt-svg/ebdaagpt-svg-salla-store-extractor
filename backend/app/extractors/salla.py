@@ -7,7 +7,7 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from urllib.parse import unquote, urljoin, urlparse
+from urllib.parse import parse_qsl, unquote, urljoin, urlparse
 from xml.etree import ElementTree
 
 import httpx
@@ -20,6 +20,19 @@ log = logging.getLogger(__name__)
 PRODUCT_PATH = re.compile(r"(?:^|/)p(\d+)(?:/)?$")
 CATEGORY_PATH = re.compile(r"(?:^|/)c(\d+)(?:/)?$")
 SIZE_VOLUME = re.compile(r"(?<!\d)(\d+(?:[.,]\d+)?)\s*(مل|مليلتر|مللي|ml|ltr|liter|l|لتر|جم|غرام|g|kg|كجم)\b", re.IGNORECASE)
+SOCIAL_HOSTS = {
+    "instagram.com": "Social_Instagram",
+    "facebook.com": "Social_Facebook",
+    "twitter.com": "Social_X_Twitter",
+    "x.com": "Social_X_Twitter",
+    "tiktok.com": "Social_TikTok",
+    "snapchat.com": "Social_Snapchat",
+    "youtube.com": "Social_YouTube",
+    "youtu.be": "Social_YouTube",
+    "linkedin.com": "Social_LinkedIn",
+    "wa.me": "Social_WhatsApp",
+    "whatsapp.com": "Social_WhatsApp",
+}
 
 
 @dataclass
@@ -165,6 +178,102 @@ def walk_json(values):
             yield from walk_json(value)
 
 
+def _meta_content(soup: BeautifulSoup, *selectors: str) -> str | None:
+    for selector in selectors:
+        node = soup.select_one(selector)
+        if node and text_or_none(node.get("content")):
+            return text_or_none(node.get("content"))
+    return None
+
+
+def website_data_from_page(raw: list[dict], soup: BeautifulSoup, url: str, strategy: str = "PUBLIC_HTML"):
+    """Normalize only public website identity/contact metadata from one page."""
+    entity_types = {"organization", "localbusiness", "store", "onlinestore", "website"}
+    entities = [obj for obj in walk_json(raw) if str(obj.get("@type", "")).lower() in entity_types]
+    primary = next((obj for obj in entities if str(obj.get("@type", "")).lower() != "website"), entities[0] if entities else {})
+    canonical_node = soup.select_one('link[rel="canonical"][href]')
+    canonical = urljoin(url, canonical_node.get("href")) if canonical_node else url
+    title = _meta_content(soup, 'meta[property="og:site_name"]', 'meta[property="og:title"]')
+    name = text_or_none(primary.get("name") or primary.get("legalName") or title or (soup.title.string if soup.title else None))
+    description = text_or_none(primary.get("description") or _meta_content(soup, 'meta[name="description"]', 'meta[property="og:description"]'))
+    logo_values = image_urls(primary.get("logo")) or image_urls(_meta_content(soup, 'meta[property="og:image"]'))
+    telephone = text_or_none(primary.get("telephone"))
+    email = text_or_none(primary.get("email"))
+    address = primary.get("address") if isinstance(primary.get("address"), dict) else {}
+    geo = primary.get("geo") if isinstance(primary.get("geo"), dict) else {}
+    contact_points = primary.get("contactPoint") or []
+    contact_points = contact_points if isinstance(contact_points, list) else [contact_points]
+    if not telephone:
+        telephone = next((text_or_none(point.get("telephone")) for point in contact_points if isinstance(point, dict) and point.get("telephone")), None)
+    if not email:
+        email = next((text_or_none(point.get("email")) for point in contact_points if isinstance(point, dict) and point.get("email")), None)
+    if not telephone:
+        tel_node = soup.select_one('a[href^="tel:"]')
+        telephone = text_or_none(tel_node.get("href", "")[4:]) if tel_node else None
+    if not email:
+        email_node = soup.select_one('a[href^="mailto:"]')
+        email = text_or_none(email_node.get("href", "")[7:].split("?", 1)[0]) if email_node else None
+
+    rows = []
+    seen = set()
+
+    def add(field, value, source="JSON_LD_OR_HTML"):
+        if isinstance(value, (dict, list)):
+            value = json.dumps(value, ensure_ascii=False)
+        value = text_or_none(value)
+        key = (field, value)
+        if value and key not in seen:
+            seen.add(key)
+            rows.append({"Field": field, "Value": value, "Source_URL": canonical, "Source_Strategy": source})
+
+    add("Store_Name", name)
+    add("Legal_Name", primary.get("legalName"))
+    add("Description", description)
+    for logo in logo_values:
+        add("Logo_URL", urljoin(url, logo))
+    add("Phone", telephone)
+    add("Email", email)
+    add("Address_Street", address.get("streetAddress"))
+    add("Location_City", address.get("addressLocality"))
+    add("Location_Region", address.get("addressRegion"))
+    add("Postal_Code", address.get("postalCode"))
+    country = address.get("addressCountry")
+    add("Country", country.get("name") if isinstance(country, dict) else country)
+    add("Latitude", geo.get("latitude"))
+    add("Longitude", geo.get("longitude"))
+    add("Opening_Hours", primary.get("openingHours") or primary.get("openingHoursSpecification"))
+    add("VAT_ID", primary.get("vatID") or primary.get("taxID"))
+    add("Public_URL", primary.get("url") or canonical)
+    add("Language", soup.html.get("lang") if soup.html else None, "HTML")
+
+    social_urls = primary.get("sameAs") or []
+    social_urls = [social_urls] if isinstance(social_urls, str) else social_urls
+    social_urls = [*social_urls, *(node.get("href") for node in soup.select("a[href]") if node.get("href"))]
+    for social_url in social_urls:
+        absolute = urljoin(url, str(social_url))
+        host = urlparse(absolute).hostname or ""
+        field = next((label for domain, label in SOCIAL_HOSTS.items() if host == domain or host.endswith(f".{domain}")), None)
+        if field:
+            add(field, absolute, "JSON_LD_OR_LINK")
+
+    store = [{"Store_ID": stable_id("store", canonical), "Store_Name": name or "Salla Store", "Store_URL": canonical, "Currency": None, "Language": soup.html.get("lang") if soup.html else None, "Extraction_Date": datetime.now(timezone.utc).isoformat(), "Data_Mode": "LIVE", "Extractor_Version": "1.7.0"}]
+    return store, rows
+
+
+async def extract_website_data(url: str):
+    headers = request_headers()
+    async with httpx.AsyncClient(timeout=httpx.Timeout(settings.request_timeout), headers=headers) as client:
+        page = await fetch(client, url)
+    marker = (page.text + " " + str(page.headers)).lower()
+    if not any(value in marker for value in ["salla", "cdn.salla", "salla.sa", "salla-theme"]):
+        raise ExtractionFailure("NOT_SALLA_STORE", "The target does not appear to be a public Salla storefront")
+    soup = BeautifulSoup(page.text, "lxml")
+    store, website_rows = website_data_from_page(embedded_json_objects(soup), soup, page.url, page.strategy)
+    tables = {"store": store, "website_data": website_rows}
+    raw = {"source_url": url, "resolved_url": page.url, "target_scope": "WEBSITE", "data_type": "WEBSITE", "exact_url_preserved": True, "strategies": [page.strategy], "pages_fetched": 1, "products_discovered": 0, "products_selected": 0, "products_extracted": 0, "public_fields_extracted": len(website_rows)}
+    return tables, raw
+
+
 def parse_sitemap(xml: str) -> tuple[list[str], list[dict]]:
     """Return nested sitemap URLs and URL entries without relying on namespaces."""
     try:
@@ -191,6 +300,53 @@ def parse_sitemap(xml: str) -> tuple[list[str], list[dict]]:
 def source_id_from_url(url: str, pattern=PRODUCT_PATH):
     match = pattern.search(urlparse(url).path.rstrip("/"))
     return match.group(1) if match else None
+
+
+def extraction_scope(url: str) -> str:
+    parsed = urlparse(url)
+    if source_id_from_url(url):
+        return "PRODUCT"
+    if parsed.path.rstrip("/") or parse_qsl(parsed.query, keep_blank_values=True):
+        return "CATEGORY"
+    return "STORE"
+
+
+def product_entries_from_dom(soup: BeautifulSoup, page_url: str) -> list[dict]:
+    entries = {}
+    selectors = 'salla-products-list a[href], salla-product-card a[href], .s-product-card a[href], [data-product-id] a[href], [data-product-id][data-url], [product-url]'
+    for node in soup.select(selectors):
+        candidate = node.get("href") or node.get("data-url") or node.get("product-url")
+        if not candidate:
+            continue
+        product_url = urljoin(page_url, candidate)
+        if source_id_from_url(product_url):
+            entries[product_url] = {"url": product_url, "lastmod": None, "images": []}
+    for obj in walk_json(embedded_json_objects(soup)):
+        candidate = obj.get("url") if isinstance(obj, dict) else None
+        if candidate:
+            product_url = urljoin(page_url, candidate)
+            if source_id_from_url(product_url):
+                entries[product_url] = {"url": product_url, "lastmod": None, "images": image_urls(obj.get("image") or obj.get("images"))}
+    return list(entries.values())
+
+
+async def discover_category_products(client, exact_url: str, first_page: FetchedPage, max_pages: int):
+    queue, seen, products, strategies = [(exact_url, first_page)], set(), {}, set()
+    while queue and len(seen) < max_pages:
+        page_url, prefetched = queue.pop(0)
+        if page_url in seen:
+            continue
+        seen.add(page_url)
+        page = prefetched or await fetch(client, page_url)
+        strategies.add(page.strategy)
+        soup = BeautifulSoup(page.text, "lxml")
+        for entry in product_entries_from_dom(soup, page.url):
+            products[entry["url"]] = entry
+        for node in soup.select('link[rel="next"][href], a[rel="next"][href], .pagination a[href]'):
+            next_url = urljoin(page.url, node.get("href"))
+            if urlparse(next_url).netloc == urlparse(exact_url).netloc and next_url not in seen:
+                queue.append((next_url, None))
+    return list(products.values()), len(seen), sorted(strategies)
 
 
 def slug_name(url: str) -> tuple[str | None, str | None]:
@@ -367,15 +523,27 @@ async def extract_live(url: str, extraction_mode: str = "QUICK", progress_callba
         if not any(x in marker for x in ["salla", "cdn.salla", "salla.sa", "salla-theme"]):
             raise ExtractionFailure("NOT_SALLA_STORE", "The target does not appear to be a public Salla storefront")
         home_soup = BeautifulSoup(home.text, "lxml")
+        scope = extraction_scope(url)
         timed_out = False
-        try:
-            sitemap_entries, sitemap_pages, sitemap_strategies = await asyncio.wait_for(discover_sitemaps(client, url, max_pages, max_depth), timeout=min(settings.sitemap_timeout_seconds if not is_full else 120, max(0.1, deadline - time.monotonic())))
-        except asyncio.TimeoutError:
-            sitemap_entries, sitemap_pages, sitemap_strategies, timed_out = [], 0, [], True
-        product_entries = [x for x in sitemap_entries if source_id_from_url(x["url"])]
-        category_entries = [x for x in sitemap_entries if source_id_from_url(x["url"], CATEGORY_PATH)]
-        if not product_entries:
+        if scope == "STORE":
+            try:
+                sitemap_entries, sitemap_pages, sitemap_strategies = await asyncio.wait_for(discover_sitemaps(client, url, max_pages, max_depth), timeout=min(settings.sitemap_timeout_seconds if not is_full else 120, max(0.1, deadline - time.monotonic())))
+            except asyncio.TimeoutError:
+                sitemap_entries, sitemap_pages, sitemap_strategies, timed_out = [], 0, [], True
+            product_entries = [x for x in sitemap_entries if source_id_from_url(x["url"])]
+            category_entries = [x for x in sitemap_entries if source_id_from_url(x["url"], CATEGORY_PATH)]
+        elif scope == "PRODUCT":
+            sitemap_entries, sitemap_pages, sitemap_strategies = [], 0, [home.strategy]
             product_entries = [{"url": url, "lastmod": None, "images": []}]
+            category_entries = []
+        else:
+            product_entries, sitemap_pages, sitemap_strategies = await discover_category_products(client, url, home, max_pages)
+            sitemap_entries = product_entries
+            category_entries = [{"url": url, "lastmod": None, "images": []}] if source_id_from_url(url, CATEGORY_PATH) else []
+            if not product_entries:
+                raise ExtractionFailure("UNSUPPORTED_STRUCTURE", "The exact category page is client-rendered and exposes no public product cards in its HTML. No store-wide sitemap fallback was used.")
+        if not product_entries:
+            raise ExtractionFailure("UNSUPPORTED_STRUCTURE", "No public product links were found for the submitted URL")
         categories, category_by_url = [], {}
         for order, entry in enumerate(category_entries, 1):
             cid = source_id_from_url(entry["url"], CATEGORY_PATH)
@@ -459,7 +627,7 @@ async def extract_live(url: str, extraction_mode: str = "QUICK", progress_callba
         if not products:
             raise ExtractionFailure("UNSUPPORTED_STRUCTURE", "Salla storefront detected, but no public product records could be structured")
         name = text_or_none(home_soup.title.string if home_soup.title else None) or "Salla Store"
-        store = [{"Store_ID": stable_id("store", url), "Store_Name": name, "Store_URL": url, "Currency": next((p["Currency"] for p in products if p["Currency"]), None), "Language": home_soup.html.get("lang") if home_soup.html else None, "Extraction_Date": datetime.now(timezone.utc).isoformat(), "Data_Mode": "LIVE", "Extractor_Version": "1.5.0"}]
+        store = [{"Store_ID": stable_id("store", url), "Store_Name": name, "Store_URL": url, "Currency": next((p["Currency"] for p in products if p["Currency"]), None), "Language": home_soup.html.get("lang") if home_soup.html else None, "Extraction_Date": datetime.now(timezone.utc).isoformat(), "Data_Mode": "LIVE", "Extractor_Version": "1.6.0"}]
         tables = {"store": store, "categories": categories, "products": products, "product_categories": product_categories, "images": images, "product_options": [], "option_values": [], "variants": variants, "variant_option_values": [], "tags": [], "product_tags": [], "seo": seo}
-        raw = {"source_url": url, "extraction_mode": extraction_mode, "strategies": sorted(strategies), "pages_fetched": 1 + sitemap_pages + len(results) + len(failures), "sitemap_pages": sitemap_pages, "sitemap_entries": len(sitemap_entries), "products_discovered": len(product_entries), "products_selected": len(selected_entries), "products_extracted": len(products), "extraction_failures": list(failures.values()), "safety_truncated": max_products is not None and len(product_entries) > max_products, "timed_out": timed_out, "timeout_seconds": timeout_seconds}
+        raw = {"source_url": url, "target_scope": scope, "exact_url_preserved": True, "extraction_mode": extraction_mode, "strategies": sorted(strategies), "pages_fetched": 1 + sitemap_pages + len(results) + len(failures), "sitemap_pages": sitemap_pages, "sitemap_entries": len(sitemap_entries), "products_discovered": len(product_entries), "products_selected": len(selected_entries), "products_extracted": len(products), "extraction_failures": list(failures.values()), "safety_truncated": max_products is not None and len(product_entries) > max_products, "timed_out": timed_out, "timeout_seconds": timeout_seconds}
         return tables, raw
