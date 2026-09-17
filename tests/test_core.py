@@ -1,4 +1,4 @@
-import io, zipfile
+import io, time, zipfile
 import pytest
 from openpyxl import load_workbook
 from backend.app.utils import normalize_url, validate_public_host, number_or_none, bool_or_none, html_to_text, URLSafetyError
@@ -8,7 +8,8 @@ from backend.app.validators.catalog import validate_catalog
 from backend.app.exporters.files import xlsx_bytes, zip_bytes
 from fastapi.testclient import TestClient
 from backend.app.main import app
-from backend.app.extractors.salla import ExtractionFailure, parse_sitemap, source_id_from_url
+from backend.app.extractors.salla import ExtractionFailure, parse_sitemap, source_id_from_url, product_from_page, json_objects
+from bs4 import BeautifulSoup
 
 def session():
     tables=mock_catalog();issues=validate_catalog(tables);tables["validation_issues"]=[x.model_dump() for x in issues]
@@ -29,6 +30,12 @@ def test_sitemap_parsing_and_product_ids():
     xml='''<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:image="http://www.google.com/schemas/sitemap-image/1.1"><url><loc>https://shop.example/item/p123</loc><lastmod>2026-01-01</lastmod><image:image><image:loc>https://cdn.example/a.jpg</image:loc></image:image></url></urlset>'''
     nested,rows=parse_sitemap(xml); assert not nested and rows[0]["images"]==["https://cdn.example/a.jpg"]
     assert source_id_from_url(rows[0]["url"])=="123"
+def test_jsonld_product_prices_and_public_fields():
+    html='''<html><head><script type="application/ld+json">{"@type":"Product","productID":"123","name":"عبوة اختبار","description":"<p>وصف</p>","weight":{"value":500,"unitText":"ml"},"notes":"يحفظ مبرداً","offers":{"price":80,"highPrice":100,"priceCurrency":"SAR","availability":"https://schema.org/InStock","shippingDetails":{"shippingLabel":"جاهز للشحن"}}}</script></head></html>'''
+    soup=BeautifulSoup(html,"lxml")
+    product,*_=product_from_page(json_objects(soup),soup,"https://shop.example/item/p123")
+    assert product["Price"]==100 and product["Sale_Price"]==80
+    assert product["Size_Volume"]=="500.0 ml" and product["Shipping_Status"]=="جاهز للشحن"
 def test_relationships_and_demo_warnings():
     issues=validate_catalog(mock_catalog()); assert any(x.Field=="SKU" for x in issues) and any(x.Field=="Images" for x in issues)
 def test_excel_generation():
@@ -44,8 +51,13 @@ def test_demo_mode_end_to_end(monkeypatch):
     client=TestClient(app)
     assert client.get("/api/health").status_code==200
     result=client.post("/api/extract",json={"store_url":"https://example.salla.sa/"})
-    assert result.status_code==200 and result.json()["mode"]=="MOCK"
+    assert result.status_code==202
     sid=result.json()["id"]
+    for _ in range(50):
+        status=client.get(f"/api/extraction/{sid}").json()
+        if status["stage"] in {"READY","COMPLETED","PARTIAL_SUCCESS","DEMO_MODE","ERROR"}: break
+        time.sleep(.01)
+    assert status["mode"]=="MOCK"
     tables=client.get(f"/api/extraction/{sid}/tables").json()["tables"]
     assert len(tables["products"])==20 and tables["store"][0]["Data_Mode"]=="MOCK"
     assert client.get(f"/api/extraction/{sid}/export/xlsx").content[:2]==b"PK"
