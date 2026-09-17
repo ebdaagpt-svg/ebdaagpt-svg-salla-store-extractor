@@ -7,7 +7,7 @@ SHEETS=[("store","Store"),("website_data","Website_Data"),("categories","Categor
 def readme_lines(session):
     store=(session.tables.get("store") or [{}])[0]
     product_limit="N/A" if session.data_type=="WEBSITE" else (session.max_products or "ALL")
-    lines=["Salla Store Migration Preparation Export",f"Export timestamp: {store.get('Extraction_Date','')}",f"Store URL: {store.get('Store_URL','')}",f"Store name: {store.get('Store_Name','')}",f"Data mode: {session.mode}",f"Data type: {session.data_type}",f"Product limit: {product_limit}","Extractor version: 1.8.0","", "Blank cells may indicate data that was not publicly available from the source storefront."]
+    lines=["Salla Store Migration Preparation Export",f"Export timestamp: {store.get('Extraction_Date','')}",f"Store URL: {store.get('Store_URL','')}",f"Store name: {store.get('Store_Name','')}",f"Data mode: {session.mode}",f"Data type: {session.data_type}",f"Product limit: {product_limit}","Extractor version: 1.8.1","", "Blank cells may indicate data that was not publicly available from the source storefront."]
     if session.mode=="MOCK":lines += ["","WARNING: This export contains MOCK DATA generated for Preview testing and must not be treated as extracted store data."]
     lines += ["", "Sheets:"]+[f"- {name}: normalized {key.replace('_',' ')} records" for key,name in SHEETS]
     return lines

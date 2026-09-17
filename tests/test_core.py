@@ -9,7 +9,7 @@ from backend.app.validators.catalog import validate_catalog
 from backend.app.exporters.files import xlsx_bytes, zip_bytes
 from fastapi.testclient import TestClient
 from backend.app.main import app
-from backend.app.extractors.salla import ExtractionFailure, embedded_json_objects, extract_size_volume, extraction_scope, parse_sitemap, product_entries_from_dom, rate_limit_delay, source_id_from_url, product_from_page, json_objects, website_data_from_page
+from backend.app.extractors.salla import ExtractionFailure, FetchedPage, embedded_json_objects, extract_size_volume, extraction_scope, fetch, parse_sitemap, product_entries_from_dom, rate_limit_delay, source_id_from_url, product_from_page, json_objects, website_data_from_page
 from backend.app.services.session_store import SessionStore
 from backend.app.transformers.products_flat import build_products_flat
 from bs4 import BeautifulSoup
@@ -57,6 +57,17 @@ def test_rate_limit_backoff_and_retry_after():
     assert rate_limit_delay({},1)==4.5
     assert rate_limit_delay({},2)==5
     assert rate_limit_delay({"retry-after":"9"},0)==9
+@pytest.mark.asyncio
+async def test_persistent_rate_limit_is_respected(monkeypatch):
+    import backend.app.extractors.salla as salla
+    async def limited(url,pacer=None): raise ExtractionFailure("RATE_LIMITED","limited")
+    class Client:
+        async def get(self,*args,**kwargs): raise AssertionError("httpx must not bypass a Scrapling 429")
+    monkeypatch.setattr(salla,"_scrapling_fetch",limited)
+    monkeypatch.setattr(salla,"validate_public_host",lambda url:url)
+    with pytest.raises(ExtractionFailure) as error:
+        await fetch(Client(),"https://shop.example/")
+    assert error.value.code=="RATE_LIMITED"
 def test_public_salla_datalayer_categories():
     html='''<html><head><script type="application/ld+json">{"@type":"Product","productID":"123","name":"منتج","offers":{"price":10}}</script></head><body><script>window.dataLayer.push({"event":"detail","ecommerce":{"detail":{"products":[{"id":123,"name":"منتج","categories":[{"id":44,"name":"العناية"}]}]}}});</script></body></html>'''
     soup=BeautifulSoup(html,"lxml")

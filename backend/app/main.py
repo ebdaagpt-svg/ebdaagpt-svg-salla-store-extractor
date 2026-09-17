@@ -16,7 +16,7 @@ from backend.app.services.session_store import SessionStore
 from backend.app.transformers.products_flat import build_products_flat
 
 logging.basicConfig(level=logging.INFO,format="%(asctime)s %(levelname)s %(name)s %(message)s")
-app=FastAPI(title="Salla Store Extractor",version="1.8.0")
+app=FastAPI(title="Salla Store Extractor",version="1.8.1")
 app.add_middleware(CORSMiddleware,allow_origins=["http://localhost:5173","http://127.0.0.1:5173"],allow_methods=["*"],allow_headers=["*"])
 session_store=SessionStore(settings.session_db_path)
 recovered_sessions=session_store.recover_interrupted()
@@ -58,7 +58,7 @@ def finalize(s,tables,raw,mode,start):
     tables["validation_issues"]=[x.model_dump() for x in issues]
     s.tables=tables;s.raw_data=raw;s.issues=issues;s.mode=mode
     errors=sum(x.Severity=="ERROR" for x in issues); warnings=sum(x.Severity=="WARNING" for x in issues)
-    s.stats={"categories":len(tables["categories"]),"products":len(tables["products"]),"variants":len(tables["variants"]),"images":len(tables["images"]),"website_fields":len(tables["website_data"]),"valid_records":max(0,sum(len(v) for k,v in tables.items() if k!="validation_issues")-errors),"warnings":warnings,"errors":errors,"pages_fetched":raw.get("pages_fetched",1),"duration_seconds":round(time.monotonic()-start,3),"timestamp":datetime.now(timezone.utc).isoformat(),"extractor_version":"1.8.0","data_type":s.data_type,"product_limit":"N/A" if s.data_type=="WEBSITE" else (s.max_products or "ALL"),"extraction_mode":s.extraction_mode,"target_scope":raw.get("target_scope","STORE")}
+    s.stats={"categories":len(tables["categories"]),"products":len(tables["products"]),"variants":len(tables["variants"]),"images":len(tables["images"]),"website_fields":len(tables["website_data"]),"valid_records":max(0,sum(len(v) for k,v in tables.items() if k!="validation_issues")-errors),"warnings":warnings,"errors":errors,"pages_fetched":raw.get("pages_fetched",1),"duration_seconds":round(time.monotonic()-start,3),"timestamp":datetime.now(timezone.utc).isoformat(),"extractor_version":"1.8.1","data_type":s.data_type,"product_limit":"N/A" if s.data_type=="WEBSITE" else (s.max_products or "ALL"),"extraction_mode":s.extraction_mode,"target_scope":raw.get("target_scope","STORE")}
     completed=1 if s.data_type=="WEBSITE" else raw.get("products_selected",len(tables["products"]));s.progress_current=completed;s.progress_total=completed;s.progress_percentage=100
     if mode=="MOCK":s.stage="DEMO_MODE";s.message="External store access is unavailable in this Preview environment. These records are MOCK DATA and were not extracted from the submitted store."
     elif raw.get("timed_out"):s.stage="COMPLETED";s.message="Time limit reached. Completed products were preserved and are ready for review/export."
@@ -73,7 +73,7 @@ async def health():
         scrapling_available=True
     except ImportError:
         scrapling_available=False
-    return {"backend_status":"ok","extractor_version":"1.8.0","external_network_available":"unknown_until_extraction","browser_available":settings.enable_browser_fallback,"scrapling_available":scrapling_available,"data_types":["PRODUCTS","WEBSITE"],"product_limits":[30,50,100,250,"ALL"],"quick_timeout_seconds":settings.extraction_timeout_seconds,"full_timeout_seconds":settings.full_extraction_timeout_seconds,"session_storage":"SQLITE","batch_size":settings.extraction_batch_size,"category_isolation":True}
+    return {"backend_status":"ok","extractor_version":"1.8.1","external_network_available":"unknown_until_extraction","browser_available":settings.enable_browser_fallback,"scrapling_available":scrapling_available,"data_types":["PRODUCTS","WEBSITE"],"product_limits":[30,50,100,250,"ALL"],"quick_timeout_seconds":settings.extraction_timeout_seconds,"full_timeout_seconds":settings.full_extraction_timeout_seconds,"session_storage":"SQLITE","batch_size":settings.extraction_batch_size,"category_isolation":True,"rate_limit_pacing":True}
 
 async def run_extraction(sid:str,store_url:str,extraction_mode:str,data_type:str,max_products:int|None):
     s=session_store.get(sid)
@@ -110,7 +110,9 @@ async def run_extraction(sid:str,store_url:str,extraction_mode:str,data_type:str
             tables=mock_website_data() if data_type=="WEBSITE" else mock_catalog();finalize(s,tables,{"source":"bundled_mock","target_scope":"WEBSITE" if data_type=="WEBSITE" else "STORE","live_failure_code":exc.code,"pages_fetched":0},"MOCK",start)
         else:
             checkpoint_count=session_store.checkpoint_count(sid)
-            s.stage="COMPLETED_WITH_ERRORS" if checkpoint_count else "ERROR";s.message=f"{exc.code}: extraction stopped after {checkpoint_count} saved batch(es)";s.stats={**s.stats,"saved_batches":checkpoint_count,"error_type":exc.code};persist_session(s)
+            s.stage="COMPLETED_WITH_ERRORS" if checkpoint_count else "ERROR"
+            s.message=("The storefront is temporarily rate-limiting public requests. Its limit was respected; wait a few minutes and retry." if exc.code=="RATE_LIMITED" else f"{exc.code}: extraction stopped after {checkpoint_count} saved batch(es)")
+            s.stats={**s.stats,"saved_batches":checkpoint_count,"error_type":exc.code,"retry_recommended":exc.code=="RATE_LIMITED"};persist_session(s)
     except Exception as exc:
         logging.exception("Unhandled extraction failure")
         checkpoint_count=session_store.checkpoint_count(sid)

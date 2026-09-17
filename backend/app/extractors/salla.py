@@ -51,6 +51,21 @@ class ExtractionFailure(RuntimeError):
         self.environmental = environmental
 
 
+class RequestPacer:
+    """Serialize request starts inside one extraction session."""
+    def __init__(self):
+        self.lock = asyncio.Lock()
+        self.last_request_at = 0.0
+
+    async def wait(self):
+        async with self.lock:
+            interval = random.uniform(settings.request_pacing_min_seconds, settings.request_pacing_max_seconds)
+            remaining = self.last_request_at + interval - time.monotonic()
+            if remaining > 0:
+                await asyncio.sleep(remaining)
+            self.last_request_at = time.monotonic()
+
+
 def request_headers() -> dict[str, str]:
     """Stable, transparent headers; rate compliance is handled by pacing."""
     return {"User-Agent": settings.user_agent, "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,application/json;q=0.8", "Accept-Language": "ar,en;q=0.8", "Cache-Control": "no-cache"}
@@ -64,14 +79,16 @@ def rate_limit_delay(headers: dict, attempt: int) -> float:
     return min(60.0, max(bounded, retry_after or 0))
 
 
-async def _scrapling_fetch(url: str) -> FetchedPage:
+async def _scrapling_fetch(url: str, pacer: RequestPacer | None = None) -> FetchedPage:
     """Fetch public content with bounded retries and validated redirects."""
     from scrapling.fetchers import AsyncFetcher
 
     for attempt in range(settings.max_retries + 1):
         current = validate_public_host(url)
         for _ in range(4):
-            page = await AsyncFetcher.get(current, follow_redirects=False, timeout=settings.request_timeout, retries=0, headers=request_headers())
+            if pacer:
+                await pacer.wait()
+            page = await AsyncFetcher.get(current, follow_redirects=False, timeout=settings.request_timeout, retries=0, headers=request_headers(), stealthy_headers=False)
             status = int(page.status)
             headers = {str(k).lower(): str(v) for k, v in dict(page.headers or {}).items()}
             if status in {301, 302, 303, 307, 308}:
@@ -97,9 +114,10 @@ async def _scrapling_fetch(url: str) -> FetchedPage:
 
 async def fetch(client: httpx.AsyncClient, url: str) -> FetchedPage:
     last = None
+    pacer = getattr(client, "_salla_request_pacer", None)
     if settings.enable_scrapling:
         try:
-            return await _scrapling_fetch(url)
+            return await _scrapling_fetch(url, pacer)
         except ExtractionFailure:
             raise
         except Exception as exc:
@@ -109,6 +127,8 @@ async def fetch(client: httpx.AsyncClient, url: str) -> FetchedPage:
         try:
             current = validate_public_host(url)
             for _ in range(4):
+                if pacer:
+                    await pacer.wait()
                 response = await client.get(current, follow_redirects=False)
                 if response.status_code in {301, 302, 303, 307, 308}:
                     current = safe_redirect(current, response.headers.get("location", ""))
@@ -301,13 +321,14 @@ def website_data_from_page(raw: list[dict], soup: BeautifulSoup, url: str, strat
         add("Mobile_App_Apple", salla_store["apps"].get("appstore"), "SALLA_PUBLIC_STATE")
         add("Mobile_App_Android", salla_store["apps"].get("googleplay"), "SALLA_PUBLIC_STATE")
 
-    store = [{"Store_ID": str(salla_store.get("id") or stable_id("store", canonical)), "Store_Name": name or "Salla Store", "Store_URL": canonical, "Currency": currency, "Language": soup.html.get("lang") if soup.html else None, "Extraction_Date": datetime.now(timezone.utc).isoformat(), "Data_Mode": "LIVE", "Extractor_Version": "1.8.0"}]
+    store = [{"Store_ID": str(salla_store.get("id") or stable_id("store", canonical)), "Store_Name": name or "Salla Store", "Store_URL": canonical, "Currency": currency, "Language": soup.html.get("lang") if soup.html else None, "Extraction_Date": datetime.now(timezone.utc).isoformat(), "Data_Mode": "LIVE", "Extractor_Version": "1.8.1"}]
     return store, rows
 
 
 async def extract_website_data(url: str):
     headers = request_headers()
     async with httpx.AsyncClient(timeout=httpx.Timeout(settings.request_timeout), headers=headers) as client:
+        client._salla_request_pacer = RequestPacer()
         page = await fetch(client, url)
     marker = (page.text + " " + str(page.headers)).lower()
     if not any(value in marker for value in ["salla", "cdn.salla", "salla.sa", "salla-theme"]):
@@ -563,6 +584,7 @@ async def extract_live(url: str, extraction_mode: str = "QUICK", progress_callba
     max_depth = settings.max_sitemap_depth if is_full else settings.quick_sitemap_depth
     headers = request_headers()
     async with httpx.AsyncClient(timeout=httpx.Timeout(settings.request_timeout), headers=headers) as client:
+        client._salla_request_pacer = RequestPacer()
         home = await fetch(client, url)
         marker = (home.text + " " + str(home.headers)).lower()
         if not any(x in marker for x in ["salla", "cdn.salla", "salla.sa", "salla-theme"]):
@@ -672,7 +694,7 @@ async def extract_live(url: str, extraction_mode: str = "QUICK", progress_callba
         if not products:
             raise ExtractionFailure("UNSUPPORTED_STRUCTURE", "Salla storefront detected, but no public product records could be structured")
         name = text_or_none(home_soup.title.string if home_soup.title else None) or "Salla Store"
-        store = [{"Store_ID": stable_id("store", url), "Store_Name": name, "Store_URL": url, "Currency": next((p["Currency"] for p in products if p["Currency"]), None), "Language": home_soup.html.get("lang") if home_soup.html else None, "Extraction_Date": datetime.now(timezone.utc).isoformat(), "Data_Mode": "LIVE", "Extractor_Version": "1.8.0"}]
+        store = [{"Store_ID": stable_id("store", url), "Store_Name": name, "Store_URL": url, "Currency": next((p["Currency"] for p in products if p["Currency"]), None), "Language": home_soup.html.get("lang") if home_soup.html else None, "Extraction_Date": datetime.now(timezone.utc).isoformat(), "Data_Mode": "LIVE", "Extractor_Version": "1.8.1"}]
         tables = {"store": store, "categories": categories, "products": products, "product_categories": product_categories, "images": images, "product_options": [], "option_values": [], "variants": variants, "variant_option_values": [], "tags": [], "product_tags": [], "seo": seo}
         raw = {"source_url": url, "target_scope": scope, "exact_url_preserved": True, "extraction_mode": extraction_mode, "max_products": max_products, "strategies": sorted(strategies), "pages_fetched": 1 + sitemap_pages + len(results) + len(failures), "sitemap_pages": sitemap_pages, "sitemap_entries": len(sitemap_entries), "products_discovered": len(product_entries), "products_selected": len(selected_entries), "products_extracted": len(products), "extraction_failures": list(failures.values()), "safety_truncated": max_products is not None and len(product_entries) > max_products, "timed_out": timed_out, "timeout_seconds": timeout_seconds}
         return tables, raw

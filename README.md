@@ -63,6 +63,8 @@ The API uses Scrapling's static HTTP fetcher first with bounded retries, then fa
 
 HTTP 429 responses are retried up to three times with bounded exponential backoff (3, 4.5, then 5 seconds) while honoring a larger numeric `Retry-After` value. Requests use randomized 0.3–0.8 second pacing and a stable, transparent extractor User-Agent; identity/header rotation is intentionally not used.
 
+Request starts are globally paced within each extraction session, including concurrent product workers. Scrapling's automatic stealth headers are disabled so the configured transparent extractor identity is preserved. A persistent 429 is respected and ends with a clear retry-later message; the pipeline never changes identity or client to evade a storefront rate limit.
+
 Submitted product and category URLs are scope-isolated. A product URL extracts only that product. A category/filter URL is fetched exactly (path and query included) and only product cards/pagination found within that listing are followed. Category jobs never fall back to the store-wide sitemap; client-rendered listings that expose no public product cards return `UNSUPPORTED_STRUCTURE` instead of unrelated catalog rows.
 
 To deploy the official Scrapling MCP server, create a second Railway service from this repository, select `Dockerfile.mcp` (or use `railway-mcp.json`), and set a long random `SCRAPLING_MCP_AUTH_TOKEN`. Give that service its own public domain. The Streamable HTTP endpoint is:
