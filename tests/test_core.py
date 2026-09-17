@@ -9,7 +9,7 @@ from backend.app.validators.catalog import validate_catalog
 from backend.app.exporters.files import xlsx_bytes, zip_bytes
 from fastapi.testclient import TestClient
 from backend.app.main import app
-from backend.app.extractors.salla import ExtractionFailure, parse_sitemap, source_id_from_url, product_from_page, json_objects
+from backend.app.extractors.salla import ExtractionFailure, extract_size_volume, parse_sitemap, source_id_from_url, product_from_page, json_objects
 from backend.app.services.session_store import SessionStore
 from bs4 import BeautifulSoup
 
@@ -41,6 +41,9 @@ def test_jsonld_product_prices_and_public_fields():
     product,*_=product_from_page(json_objects(soup),soup,"https://shop.example/item/p123")
     assert product["Price"]==100 and product["Sale_Price"]==80
     assert product["Size_Volume"]=="500.0 ml" and product["Shipping_Status"]=="جاهز للشحن"
+def test_size_volume_regex():
+    assert extract_size_volume("عطر مركز 100 مل")=="100 مل"
+    assert extract_size_volume("Bottle 80ML")=="80 ML"
 def test_relationships_and_demo_warnings():
     issues=validate_catalog(mock_catalog()); assert any(x.Field=="SKU" for x in issues) and any(x.Field=="Images" for x in issues)
 def test_excel_generation():
@@ -58,19 +61,19 @@ def test_sqlite_session_and_export_persistence():
 
 def test_demo_mode_end_to_end(monkeypatch):
     import backend.app.main as main
-    async def network_blocked(url): raise ExtractionFailure("PREVIEW_NETWORK_RESTRICTED","blocked",True)
+    async def network_blocked(url,*args,**kwargs): raise ExtractionFailure("PREVIEW_NETWORK_RESTRICTED","blocked",True)
     monkeypatch.setattr(main,"validate_public_host",lambda url:url)
     monkeypatch.setattr(main,"extract_live",network_blocked)
     client=TestClient(app)
     assert client.get("/api/health").status_code==200
-    result=client.post("/api/extract",json={"store_url":"https://example.salla.sa/"})
+    result=client.post("/api/extract",json={"store_url":"https://example.salla.sa/","extraction_mode":"FULL"})
     assert result.status_code==202
     sid=result.json()["id"]
     for _ in range(50):
         status=client.get(f"/api/extraction/{sid}").json()
         if status["stage"] in {"READY","COMPLETED","PARTIAL_SUCCESS","DEMO_MODE","ERROR"}: break
         time.sleep(.01)
-    assert status["mode"]=="MOCK"
+    assert status["mode"]=="MOCK" and status["extraction_mode"]=="FULL"
     tables=client.get(f"/api/extraction/{sid}/tables").json()["tables"]
     assert len(tables["products"])==20 and tables["store"][0]["Data_Mode"]=="MOCK"
     assert client.get(f"/api/extraction/{sid}/export/xlsx").content[:2]==b"PK"
