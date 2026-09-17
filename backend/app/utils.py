@@ -1,5 +1,5 @@
 import hashlib, html, ipaddress, re, socket
-from urllib.parse import urlparse, urljoin
+from urllib.parse import parse_qsl, urlencode, urlparse, urljoin
 from bs4 import BeautifulSoup
 
 class URLSafetyError(ValueError): pass
@@ -11,7 +11,16 @@ def normalize_url(value: str) -> str:
     if not parsed.hostname or parsed.username or parsed.password: raise URLSafetyError("Invalid public store URL")
     host=parsed.hostname.lower().rstrip('.')
     if host in {"localhost","localhost.localdomain"} or host.endswith(".local"): raise URLSafetyError("Local addresses are blocked")
-    return parsed._replace(netloc=host+(f":{parsed.port}" if parsed.port else ""), path=parsed.path or "/", fragment="").geturl()
+    try:
+        port=parsed.port
+    except ValueError as exc:
+        raise URLSafetyError("Invalid URL port") from exc
+    # Re-encode complex Salla filters such as filters[category_id] safely.
+    try:
+        query=urlencode(parse_qsl(parsed.query,keep_blank_values=True),doseq=True)
+    except ValueError as exc:
+        raise URLSafetyError("Invalid URL query parameters") from exc
+    return parsed._replace(netloc=host+(f":{port}" if port else ""), path=parsed.path or "/", query=query, fragment="").geturl()
 
 def validate_public_host(url: str) -> str:
     url=normalize_url(url); host=urlparse(url).hostname
