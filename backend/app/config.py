@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     quick_products: int = 30
     extraction_timeout_seconds: float = 45
     full_extraction_timeout_seconds: float = 1800
-    extraction_batch_size: int = 25
+    extraction_batch_size: int = 40
     sitemap_timeout_seconds: float = 15
     request_pacing_min_seconds: float = 0.3
     request_pacing_max_seconds: float = 0.8
