@@ -16,6 +16,9 @@ type Result = {
   mode: "LIVE" | "MOCK";
   message: string;
   stats: Record<string, number | string>;
+  progress_current?: number;
+  progress_total?: number;
+  progress_percentage?: number;
 };
 type Payload = {
   tables: Record<string, Record<string, unknown>[]>;
@@ -131,6 +134,9 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [stage, setStage] = useState("IDLE");
   const [error, setError] = useState("");
+  const [extractionMode, setExtractionMode] = useState<"QUICK" | "FULL">(
+    "QUICK",
+  );
   async function run() {
     setBusy(true);
     setError("");
@@ -141,16 +147,23 @@ function App() {
       const r = await fetch("/api/extract", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ store_url: url }),
+        body: JSON.stringify({
+          store_url: url,
+          extraction_mode: extractionMode,
+        }),
       });
       const body = await r.json();
       if (!r.ok) throw new Error(body.detail?.message || "Extraction failed");
       setResult(body);
       let current = body;
       while (
-          !["READY", "COMPLETED", "PARTIAL_SUCCESS", "DEMO_MODE", "ERROR"].includes(
-          current.stage,
-        )
+        ![
+          "READY",
+          "COMPLETED",
+          "PARTIAL_SUCCESS",
+          "DEMO_MODE",
+          "ERROR",
+        ].includes(current.stage)
       ) {
         await new Promise((resolve) => setTimeout(resolve, 1500));
         const statusResponse = await fetch(`/api/extraction/${body.id}`);
@@ -181,7 +194,9 @@ function App() {
   }
   const ready =
     !!result &&
-    ["READY", "COMPLETED", "PARTIAL_SUCCESS", "DEMO_MODE"].includes(result.stage);
+    ["READY", "COMPLETED", "PARTIAL_SUCCESS", "DEMO_MODE"].includes(
+      result.stage,
+    );
   const rows =
     tab === "raw"
       ? data
@@ -195,7 +210,7 @@ function App() {
           <Database size={22} />
           <div>
             <strong>Salla Data Extractor</strong>
-                <small>Migration preparation · v1.3.0</small>
+            <small>Migration preparation · v1.4.0</small>
           </div>
         </div>
         <div className="health">
@@ -219,6 +234,21 @@ function App() {
               placeholder="https://store.example.com"
               disabled={busy}
             />
+          </label>
+          <label className="mode-field">
+            Extraction mode
+            <select
+              value={extractionMode}
+              onChange={(e) =>
+                setExtractionMode(e.target.value as "QUICK" | "FULL")
+              }
+              disabled={busy}
+            >
+              <option value="QUICK">Quick Extract · first 30 products</option>
+              <option value="FULL">
+                Full Extract · complete public catalog
+              </option>
+            </select>
           </label>
           <button className="primary" onClick={run} disabled={busy || !url}>
             {busy ? (
@@ -256,7 +286,17 @@ function App() {
         </div>
         {busy && (
           <div className="progress">
-            <i />
+            <i
+              style={{
+                width: `${result?.progress_percentage || 2}%`,
+                animation: result?.progress_total ? "none" : undefined,
+              }}
+            />
+            <span>
+              {result?.progress_total
+                ? `${result.progress_current} / ${result.progress_total} · ${result.progress_percentage}%`
+                : "Discovering catalog…"}
+            </span>
           </div>
         )}
       </section>
