@@ -111,7 +111,7 @@ async def run_extraction(sid:str,store_url:str,extraction_mode:str,data_type:str
         else:
             checkpoint_count=session_store.checkpoint_count(sid)
             s.stage="COMPLETED_WITH_ERRORS" if checkpoint_count else "ERROR"
-            s.message=("The storefront is temporarily rate-limiting public requests. Its limit was respected; wait a few minutes and retry." if exc.code=="RATE_LIMITED" else f"{exc.code}: extraction stopped after {checkpoint_count} saved batch(es)")
+            s.message=("The storefront is temporarily rate-limiting public requests. Its limit was respected; wait a few minutes and retry." if exc.code=="RATE_LIMITED" else f"{exc.code}: {str(exc)}" + (f" ({checkpoint_count} batch(es) preserved)" if checkpoint_count else ""))
             s.stats={**s.stats,"saved_batches":checkpoint_count,"error_type":exc.code,"retry_recommended":exc.code=="RATE_LIMITED"};persist_session(s)
     except Exception as exc:
         logging.exception("Unhandled extraction failure")
