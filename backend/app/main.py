@@ -1,4 +1,4 @@
-import logging, time, uuid
+import asyncio, logging, time, uuid
 from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -45,22 +45,31 @@ async def health():
         scrapling_available=False
     return {"backend_status":"ok","extractor_version":"1.1.0","external_network_available":"unknown_until_extraction","browser_available":settings.enable_browser_fallback,"scrapling_available":scrapling_available}
 
-@app.post("/api/extract")
-async def extract(req:ExtractRequest):
-    sid=str(uuid.uuid4());s=Session(id=sid,stage="VALIDATING_URL",message="Validating public URL");sessions[sid]=s;start=time.monotonic()
+async def run_extraction(sid:str,store_url:str):
+    s=sessions[sid];start=time.monotonic()
     try:
-        url=normalize_url(req.store_url);validate_public_host(url);s.stage="DISCOVERING";s.message="Discovering public Salla data"
+        url=normalize_url(store_url);validate_public_host(url);s.stage="DISCOVERING";s.message="Discovering public Salla data"
         s.stage="FETCHING";s.message="Fetching public storefront"
         tables,raw=await extract_live(url);s.stage="STRUCTURING";s.message="Normalizing relational tables";s.stage="VALIDATING_DATA";s.message="Validating relationships and records";finalize(s,tables,raw,"LIVE",start)
     except URLSafetyError as exc:
-        s.stage="ERROR";s.message=str(exc);raise HTTPException(400,{"code":"INVALID_URL","message":str(exc),"session_id":sid})
+        s.stage="ERROR";s.message=str(exc)
     except ExtractionFailure as exc:
         if exc.environmental and settings.enable_demo_fallback:
             tables=mock_catalog();finalize(s,tables,{"source":"bundled_mock","live_failure_code":exc.code,"pages_fetched":0},"MOCK",start)
         else:
-            s.stage="ERROR";s.message=str(exc);raise HTTPException(422,{"code":exc.code,"message":str(exc),"session_id":sid})
+            s.stage="ERROR";s.message=f"{exc.code}: {exc}"
     except Exception:
-        logging.exception("Unhandled extraction failure");s.stage="ERROR";s.message="Unexpected extraction error";raise HTTPException(500,{"code":"PARSING_ERROR","message":"The storefront response could not be processed","session_id":sid})
+        logging.exception("Unhandled extraction failure");s.stage="ERROR";s.message="The storefront response could not be processed"
+
+@app.post("/api/extract",status_code=202)
+async def extract(req:ExtractRequest):
+    # Validate synchronously so malformed/unsafe URLs still receive an immediate 4xx.
+    try:
+        url=normalize_url(req.store_url);validate_public_host(url)
+    except URLSafetyError as exc:
+        raise HTTPException(400,{"code":"INVALID_URL","message":str(exc)})
+    sid=str(uuid.uuid4());s=Session(id=sid,stage="VALIDATING_URL",message="Validating public URL");sessions[sid]=s
+    asyncio.create_task(run_extraction(sid,url))
     return {"id":sid,"stage":s.stage,"mode":s.mode,"message":s.message,"stats":s.stats}
 
 def get_session(sid):
