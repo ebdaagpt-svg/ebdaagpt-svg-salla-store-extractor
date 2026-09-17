@@ -15,7 +15,7 @@ from backend.app.exporters.files import xlsx_bytes, zip_bytes
 from backend.app.services.session_store import SessionStore
 
 logging.basicConfig(level=logging.INFO,format="%(asctime)s %(levelname)s %(name)s %(message)s")
-app=FastAPI(title="Salla Store Extractor",version="1.4.0")
+app=FastAPI(title="Salla Store Extractor",version="1.5.0")
 app.add_middleware(CORSMiddleware,allow_origins=["http://localhost:5173","http://127.0.0.1:5173"],allow_methods=["*"],allow_headers=["*"])
 session_store=SessionStore(settings.session_db_path)
 recovered_sessions=session_store.recover_interrupted()
@@ -56,7 +56,7 @@ def finalize(s,tables,raw,mode,start):
     tables["validation_issues"]=[x.model_dump() for x in issues]
     s.tables=tables;s.raw_data=raw;s.issues=issues;s.mode=mode
     errors=sum(x.Severity=="ERROR" for x in issues); warnings=sum(x.Severity=="WARNING" for x in issues)
-    s.stats={"categories":len(tables["categories"]),"products":len(tables["products"]),"variants":len(tables["variants"]),"images":len(tables["images"]),"valid_records":max(0,sum(len(v) for k,v in tables.items() if k!="validation_issues")-errors),"warnings":warnings,"errors":errors,"pages_fetched":raw.get("pages_fetched",1),"duration_seconds":round(time.monotonic()-start,3),"timestamp":datetime.now(timezone.utc).isoformat(),"extractor_version":"1.4.0","extraction_mode":s.extraction_mode}
+    s.stats={"categories":len(tables["categories"]),"products":len(tables["products"]),"variants":len(tables["variants"]),"images":len(tables["images"]),"valid_records":max(0,sum(len(v) for k,v in tables.items() if k!="validation_issues")-errors),"warnings":warnings,"errors":errors,"pages_fetched":raw.get("pages_fetched",1),"duration_seconds":round(time.monotonic()-start,3),"timestamp":datetime.now(timezone.utc).isoformat(),"extractor_version":"1.5.0","extraction_mode":s.extraction_mode}
     s.progress_current=raw.get("products_selected",len(tables["products"]));s.progress_total=raw.get("products_selected",len(tables["products"]));s.progress_percentage=100
     if mode=="MOCK":s.stage="DEMO_MODE";s.message="External store access is unavailable in this Preview environment. These records are MOCK DATA and were not extracted from the submitted store."
     elif raw.get("timed_out"):s.stage="COMPLETED";s.message="Time limit reached. Completed products were preserved and are ready for review/export."
@@ -71,29 +71,43 @@ async def health():
         scrapling_available=True
     except ImportError:
         scrapling_available=False
-    return {"backend_status":"ok","extractor_version":"1.4.0","external_network_available":"unknown_until_extraction","browser_available":settings.enable_browser_fallback,"scrapling_available":scrapling_available,"quick_products":settings.quick_products,"quick_timeout_seconds":settings.extraction_timeout_seconds,"full_timeout_seconds":settings.full_extraction_timeout_seconds,"session_storage":"SQLITE"}
+    return {"backend_status":"ok","extractor_version":"1.5.0","external_network_available":"unknown_until_extraction","browser_available":settings.enable_browser_fallback,"scrapling_available":scrapling_available,"quick_products":settings.quick_products,"quick_timeout_seconds":settings.extraction_timeout_seconds,"full_timeout_seconds":settings.full_extraction_timeout_seconds,"session_storage":"SQLITE","batch_size":settings.extraction_batch_size}
 
 async def run_extraction(sid:str,store_url:str,extraction_mode:str):
     s=session_store.get(sid)
     if not s:
         logging.error("Extraction session %s disappeared before processing",sid);return
     start=time.monotonic()
+    session_store.clear_checkpoints(sid)
     try:
         url=normalize_url(store_url);validate_public_host(url);s.stage="DISCOVERING";s.message="Discovering public Salla data";persist_session(s)
         s.stage="FETCHING";s.message="Fetching public storefront";persist_session(s)
         async def update_progress(current,total):
             s.progress_current=current;s.progress_total=total;s.progress_percentage=round((current/total)*100,1) if total else 0;s.message=f"Fetching products: {current} / {total}";persist_session(s)
-        tables,raw=await extract_live(url,extraction_mode,update_progress);s.stage="STRUCTURING";s.message="Normalizing relational tables";persist_session(s)
+        async def save_checkpoint(batch_number,records):
+            session_store.save_checkpoint(sid,batch_number,records)
+        async def load_checkpoints():
+            combined={}
+            for checkpoint in session_store.load_checkpoints(sid): combined.update(checkpoint)
+            return [combined]
+        tables,raw=await extract_live(url,extraction_mode,update_progress,save_checkpoint if extraction_mode=="FULL" else None,load_checkpoints if extraction_mode=="FULL" else None);s.stage="STRUCTURING";s.message="Normalizing relational tables";persist_session(s)
         s.stage="VALIDATING_DATA";s.message="Validating relationships and records";persist_session(s);finalize(s,tables,raw,"LIVE",start)
+        session_store.clear_checkpoints(sid)
     except URLSafetyError as exc:
         s.stage="ERROR";s.message=str(exc);persist_session(s)
     except ExtractionFailure as exc:
         if exc.environmental and settings.enable_demo_fallback:
             tables=mock_catalog();finalize(s,tables,{"source":"bundled_mock","live_failure_code":exc.code,"pages_fetched":0},"MOCK",start)
         else:
-            s.stage="ERROR";s.message=f"{exc.code}: {exc}";persist_session(s)
-    except Exception:
-        logging.exception("Unhandled extraction failure");s.stage="ERROR";s.message="The storefront response could not be processed";persist_session(s)
+            checkpoint_count=session_store.checkpoint_count(sid)
+            s.stage="COMPLETED_WITH_ERRORS" if checkpoint_count else "ERROR";s.message=f"{exc.code}: extraction stopped after {checkpoint_count} saved batch(es)";s.stats={**s.stats,"saved_batches":checkpoint_count,"error_type":exc.code};persist_session(s)
+    except Exception as exc:
+        logging.exception("Unhandled extraction failure")
+        checkpoint_count=session_store.checkpoint_count(sid)
+        s.stage="COMPLETED_WITH_ERRORS" if checkpoint_count else "ERROR"
+        s.message=f"Extraction stopped safely after {checkpoint_count} saved batch(es)."
+        s.stats={**s.stats,"saved_batches":checkpoint_count,"error_type":type(exc).__name__}
+        persist_session(s)
 
 @app.post("/api/extract",status_code=202)
 async def extract(req:ExtractRequest):
